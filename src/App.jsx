@@ -69,7 +69,7 @@ export default function InsulCtrlApp() {
   const [toast, setToast] = useState({ show: false, msg: '', type: 'success' }); 
 
   // 版本标记，用于确认更新
-  const APP_VERSION = "Debug v2.0";
+  const APP_VERSION = "Debug v2.1";
 
   const deviceDataRef = useRef(deviceData); 
   useEffect(() => { 
@@ -261,6 +261,11 @@ export default function InsulCtrlApp() {
       </header> 
 
       <main className="max-w-md mx-auto p-4 space-y-5"> 
+
+        {/* Debug Banner - 仅用于调试阶段 */}
+        <div className="bg-yellow-400 text-yellow-900 text-center py-2 px-4 rounded-xl font-bold text-sm shadow-sm animate-pulse">
+          DEBUG MODE v2.1 - 若看到此条，说明更新已生效
+        </div>
 
         {/* 连接页 */} 
         {connState === 'disconnected' && ( 
