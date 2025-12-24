@@ -1,28 +1,51 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Bluetooth, Clock, Settings, Zap, ShieldCheck, 
-  RefreshCw, CheckCircle, AlertTriangle, Timer, XCircle 
+  RefreshCw, CheckCircle, AlertTriangle, Timer, XCircle, Info 
 } from 'lucide-react';
 
+// ==========================================
+// BLE 协议常量定义
+// ==========================================
 const SERVICE_UUID = "0000aaaa-0000-1000-8000-00805f9b34fb";
-const CHAR_UUID_CMD = "0000bbbb-0000-1000-8000-00805f9b34fb";
+const CHAR_UUID_CMD = "0000bbbb-0000-1000-8000-00805f9b34fb"; 
 
-// 辅助: 计算倒计时
+// ==========================================
+// 辅助工具函数
+// ==========================================
+const formatTime = (ts) => {
+  if (!ts) return "--:--:--";
+  const date = new Date(ts * 1000);
+  return date.toLocaleTimeString('en-GB', { hour12: false });
+};
+
+const formatShortTime = (h, m) => {
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+};
+
 const calculateCountdown = (deviceTs, alarmH, alarmM) => {
   if (!deviceTs) return "--:--:--";
   const now = new Date(deviceTs * 1000);
   let alarm = new Date(deviceTs * 1000);
   alarm.setHours(alarmH, alarmM, 0, 0);
-  if (alarm <= now) alarm.setDate(alarm.getDate() + 1);
+  
+  if (alarm <= now) {
+    alarm.setDate(alarm.getDate() + 1);
+  }
+  
   const diff = alarm - now;
   const h = Math.floor(diff / 3600000);
   const m = Math.floor((diff % 3600000) / 60000);
   const s = Math.floor((diff % 60000) / 1000);
+  
   return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 };
 
 export default function InsulCtrlApp() {
-  const [connState, setConnState] = useState('disconnected');
+  // ==========================================
+  // 应用状态
+  // ==========================================
+  const [connState, setConnState] = useState('disconnected'); 
   const [device, setDevice] = useState(null);
   const [server, setServer] = useState(null);
   const [characteristic, setCharacteristic] = useState(null);
@@ -33,154 +56,478 @@ export default function InsulCtrlApp() {
     alarmH: 7,
     alarmM: 30,
     deviceTs: Math.floor(Date.now() / 1000), 
+    lastUpdate: 0,
   });
 
   const [logs, setLogs] = useState([]);
+  const [isMockMode, setIsMockMode] = useState(false);
   const [pendingAlarmH, setPendingAlarmH] = useState(7);
   const [pendingAlarmM, setPendingAlarmM] = useState(30);
   
-  // 日志
-  const addLog = (msg) => setLogs(p => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...p].slice(0, 20));
+  const [isBluetoothSupported, setIsBluetoothSupported] = useState(true);
+  const [toast, setToast] = useState({ show: false, msg: '', type: 'success' });
+
+  // 版本标记，用于确认更新
+  const APP_VERSION = "v3.0 Final";
+
+  const deviceDataRef = useRef(deviceData);
+  useEffect(() => { 
+    deviceDataRef.current = deviceData;
+    if (!navigator.bluetooth) {
+      setIsBluetoothSupported(false);
+      addLog("当前浏览器不支持 Web Bluetooth API", "error");
+    }
+  }, [deviceData]);
+
+  // 显示 Toast
+  const showToast = (msg, type = 'success') => {
+    setToast({ show: true, msg, type });
+    setTimeout(() => setToast(prev => ({ ...prev, show: false })), 3000);
+  };
+
+  // ========================================== 
+  // 日志 (保留但默认隐藏)
+  // ========================================== 
+  const addLog = (msg, type = 'info') => { 
+    // console.log(`[${type}] ${msg}`); // 生产环境仅在控制台输出
+  };
 
   // ==========================================
-  // 核心：短协议处理
+  // 核心：短协议解析逻辑 (New!)
   // ==========================================
-  
-  // 1. 接收数据: S:模式,继电器,时,分
   const handleNotifications = (event) => {
+    const value = event.target.value;
+    const decoder = new TextDecoder('utf-8');
     try {
-      const decoder = new TextDecoder('utf-8');
-      const str = decoder.decode(event.target.value);
-      // 格式: S:MODE,RELAY,HH,MM
-      if (str.startsWith("S:")) {
-        const parts = str.substring(2).split(","); // 去掉 S:
+      const rawStr = decoder.decode(value);
+      // 协议格式: S:模式Code,继电器(0/1),时,分
+      // 模式Code: 0=IDLE, 1=ARMED, 2=ON
+      
+      if (rawStr.startsWith("S:")) {
+        const parts = rawStr.substring(2).split(",");
         if (parts.length >= 4) {
           const modeCode = parseInt(parts[0]);
-          const modeStr = modeCode === 1 ? "ARMED" : (modeCode === 2 ? "ON" : "IDLE");
-          
+          const relayVal = parseInt(parts[1]);
+          const hh = parseInt(parts[2]);
+          const mm = parseInt(parts[3]);
+
+          // 映射回 UI 需要的字符串状态
+          let modeStr = "IDLE";
+          if (modeCode === 1) modeStr = "ARMED";
+          if (modeCode === 2) modeStr = "ON"; // 实际上 ON 时 UI 也显示 ARMED 样式比较好，或者单独处理
+
           setDeviceData(prev => ({
             ...prev,
             mode: modeStr,
-            relay: parts[1] === "1",
-            alarmH: parseInt(parts[2]),
-            alarmM: parseInt(parts[3]),
-            deviceTs: Math.floor(Date.now() / 1000) // 简单用本地时间更新 UI
+            relay: relayVal === 1,
+            alarmH: hh,
+            alarmM: mm,
+            deviceTs: Math.floor(Date.now() / 1000), // 使用手机时间校准显示
+            lastUpdate: Date.now()
           }));
         }
       }
-    } catch (e) { console.error(e); }
-  };
-
-  // 2. 发送数据 (发送纯字符串)
-  const sendStr = async (str) => {
-    if (!characteristic) return;
-    try {
-      addLog(`TX: ${str}`);
-      const encoder = new TextEncoder();
-      await characteristic.writeValue(encoder.encode(str));
-    } catch (e) {
-      addLog(`Error: ${e.message}`);
+    } catch (error) {
+      console.error("Parse Error", error);
     }
   };
 
   // ==========================================
-  // 连接逻辑
+  // BLE 连接逻辑
   // ==========================================
   const connectBLE = async () => {
     try {
+      addLog("正在扫描蓝牙设备...", "info");
       setConnState('connecting');
+      setIsMockMode(false);
+
+      // 临时改为扫描所有设备，以排查 UUID 过滤问题 (保留，防止兼容性问题)
       const device = await navigator.bluetooth.requestDevice({
         acceptAllDevices: true,
         optionalServices: [SERVICE_UUID]
       });
-      
+
+      addLog(`找到设备: ${device.name}`, "success");
       setDevice(device);
-      device.addEventListener('gattserverdisconnected', () => {
-        setConnState('disconnected');
-        setCharacteristic(null);
-      });
+      device.addEventListener('gattserverdisconnected', onDisconnected);
 
       const server = await device.gatt.connect();
+      setServer(server);
       const service = await server.getPrimaryService(SERVICE_UUID);
       const char = await service.getCharacteristic(CHAR_UUID_CMD);
       
+      // 开启通知监听 (关键)
       await char.startNotifications();
       char.addEventListener('characteristicvaluechanged', handleNotifications);
-      
+      addLog("数据监听已开启", "info");
+
       setCharacteristic(char);
       setConnState('connected');
-      addLog("Connected (Short Protocol)");
-    } catch (e) {
+      addLog("连接成功", "success");
+      showToast("蓝牙连接成功");
+
+    } catch (error) {
+      console.error(error);
+      addLog(`连接失败: ${error.message}`, "error");
       setConnState('disconnected');
-      alert(e.message);
+      alert(`连接失败:\n${error.message}`);
+    }
+  };
+
+  const onDisconnected = () => {
+    addLog("设备已断开", "warn");
+    setConnState('disconnected');
+    setDevice(null);
+    setServer(null);
+    setCharacteristic(null);
+    showToast("设备已断开连接", "error");
+  };
+
+  // ==========================================
+  // Mock 逻辑 (适配短协议)
+  // ==========================================
+  const connectMock = () => {
+    setIsMockMode(true);
+    setConnState('connecting');
+    setTimeout(() => {
+      setConnState('connected');
+      addLog("Mock 设备已连接", "success");
+      showToast("虚拟设备已连接");
+      startMockHeartbeat();
+    }, 600);
+  };
+
+  const mockIntervalRef = useRef(null);
+  const startMockHeartbeat = () => {
+    if (mockIntervalRef.current) clearInterval(mockIntervalRef.current);
+    mockIntervalRef.current = setInterval(() => {
+      setDeviceData(prev => {
+        let nextTs = prev.deviceTs + 1;
+        let nextRelay = prev.relay;
+        let nextMode = prev.mode;
+        
+        if (prev.mode === 'ARMED') {
+           const now = new Date(nextTs * 1000);
+           if (now.getHours() === prev.alarmH && now.getMinutes() === prev.alarmM && now.getSeconds() === 0) {
+             nextRelay = true;
+             nextMode = 'ON'; // 模拟触发
+             addLog("Mock: 闹钟触发!", "warn");
+             showToast("闹钟触发！", "error"); 
+           }
+        }
+        return { ...prev, deviceTs: nextTs, relay: nextRelay, mode: nextMode };
+      });
+    }, 1000);
+  };
+
+  // ==========================================
+  // 指令发送 (升级为短协议)
+  // ==========================================
+  const sendCommand = async (cmdStr) => {
+    addLog(`TX: ${cmdStr}`, "tx");
+
+    if (isMockMode) {
+      // Mock 逻辑简单模拟回显
+      setTimeout(() => {
+        if (cmdStr.startsWith("T:")) {
+           showToast("时间同步成功");
+        } else if (cmdStr.startsWith("A:")) {
+           const [_, h, m] = cmdStr.split(":");
+           setDeviceData(p => ({...p, alarmH: parseInt(h), alarmM: parseInt(m)}));
+           showToast(`闹钟设为 ${h}:${m}`);
+        } else if (cmdStr.startsWith("R:")) {
+           const val = cmdStr.split(":")[1] === "1";
+           setDeviceData(p => ({...p, relay: val}));
+           showToast(val ? "继电器吸合" : "继电器断开");
+        } else if (cmdStr.startsWith("M:")) {
+           const val = cmdStr.split(":")[1] === "1";
+           setDeviceData(p => ({...p, mode: val ? "ARMED" : "IDLE", relay: false}));
+           showToast(val ? "已武装 (ARMED)" : "已取消 (IDLE)");
+        }
+      }, 100);
+      return;
+    }
+
+    if (!characteristic) return;
+    try {
+      const encoder = new TextEncoder();
+      // 直接发送短字符串，无需 JSON，无需 # 结束符(因为长度<20字节)
+      await characteristic.writeValue(encoder.encode(cmdStr));
+      // 注意：不立即弹Toast，等待设备回传 S:... 状态包来更新界面
+    } catch (error) {
+      addLog(`TX Fail: ${error.message}`, "error");
+      showToast("发送失败", "error");
     }
   };
 
   // ==========================================
-  // 按钮事件
+  // 功能处理 (构造短指令)
   // ==========================================
-  const toggleRelay = () => sendStr(deviceData.relay ? "R:0" : "R:1");
-  const toggleArm = () => sendStr(deviceData.mode === "ARMED" ? "M:0" : "M:1");
-  const syncTime = () => sendStr(`T:${Math.floor(Date.now()/1000)}`);
-  const setAlarm = () => sendStr(`A:${String(pendingAlarmH).padStart(2,'0')}:${String(pendingAlarmM).padStart(2,'0')}`);
+  const handleSyncTime = () => {
+    const ts = Math.floor(Date.now() / 1000);
+    sendCommand(`T:${ts}`);
+  };
 
+  const handleSetAlarm = () => {
+    const h = String(pendingAlarmH).padStart(2, '0');
+    const m = String(pendingAlarmM).padStart(2, '0');
+    sendCommand(`A:${h}:${m}`);
+  };
+
+  const toggleRelay = () => {
+    // 根据当前状态取反
+    const nextVal = deviceData.relay ? "0" : "1";
+    sendCommand(`R:${nextVal}`);
+  };
+
+  const toggleArm = () => {
+    // 根据当前状态取反
+    const nextVal = deviceData.mode === 'ARMED' ? "0" : "1";
+    sendCommand(`M:${nextVal}`);
+  };
+
+  // ==========================================
+  // 渲染 (保持原版高颜值 UI)
+  // ==========================================
   return (
-    <div className="min-h-screen bg-slate-100 p-4 font-sans text-slate-800">
-      <header className="flex justify-between items-center mb-6">
-        <h1 className="text-xl font-bold flex gap-2"><Zap className="text-blue-600"/> InsulCtrl Lite</h1>
-        <div className={`w-3 h-3 rounded-full ${connState === 'connected' ? 'bg-green-500' : 'bg-red-500'}`}/>
-      </header>
+    <div className="min-h-screen bg-slate-100 font-sans text-slate-800 pb-10 relative select-none">
+      
+      {/* --- Toast 通知 --- */}
+      <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 transition-all duration-300 ${toast.show ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4 pointer-events-none'}`}>
+        <div className={`px-4 py-3 rounded-xl shadow-lg flex items-center gap-2 text-sm font-bold ${
+          toast.type === 'error' ? 'bg-red-500 text-white' : 'bg-slate-800 text-white'
+        }`}>
+          {toast.type === 'success' && <CheckCircle className="w-4 h-4" />}
+          {toast.type === 'error' && <AlertTriangle className="w-4 h-4" />}
+          {toast.msg}
+        </div>
+      </div>
 
-      {connState === 'disconnected' ? (
-        <button onClick={connectBLE} className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg">
-          连接设备 (Short Proto)
-        </button>
-      ) : (
-        <div className="space-y-4">
-          {/* 状态卡片 */}
-          <div className="grid grid-cols-2 gap-4">
-            <button onClick={toggleRelay} className={`p-4 rounded-2xl text-left transition-all ${deviceData.relay ? 'bg-red-500 text-white' : 'bg-white'}`}>
-              <div className="text-xs font-bold opacity-70">RELAY</div>
-              <div className="text-2xl font-black">{deviceData.relay ? 'ON' : 'OFF'}</div>
-            </button>
-            <button onClick={toggleArm} className={`p-4 rounded-2xl text-left transition-all ${deviceData.mode === 'ARMED' ? 'bg-green-500 text-white' : 'bg-white'}`}>
-              <div className="text-xs font-bold opacity-70">MODE</div>
-              <div className="text-2xl font-black">{deviceData.mode}</div>
-            </button>
-          </div>
-
-          {/* 倒计时 */}
-          <div className="bg-white p-6 rounded-2xl shadow-sm text-center">
-            <div className="text-xs text-slate-400 mb-2">COUNTDOWN</div>
-            <div className="text-4xl font-mono font-black text-slate-800">
-              {deviceData.mode === 'ARMED' ? calculateCountdown(deviceData.deviceTs, deviceData.alarmH, deviceData.alarmM) : "--:--:--"}
-            </div>
-          </div>
-
-          {/* 设置 */}
-          <div className="bg-white p-4 rounded-2xl shadow-sm flex justify-between items-center">
-            <div>
-              <div className="text-xs text-slate-400">ALARM SET</div>
-              <div className="flex items-baseline gap-1 text-xl font-bold">
-                <select value={pendingAlarmH} onChange={e=>setPendingAlarmH(e.target.value)} className="bg-transparent outline-none">
-                  {[...Array(24).keys()].map(h=><option key={h} value={h}>{h}</option>)}
-                </select>
-                :
-                <select value={pendingAlarmM} onChange={e=>setPendingAlarmM(e.target.value)} className="bg-transparent outline-none">
-                  {[...Array(60).keys()].map(m=><option key={m} value={m}>{m}</option>)}
-                </select>
-              </div>
-            </div>
-            <button onClick={setAlarm} className="bg-slate-100 p-3 rounded-xl hover:bg-slate-200"><CheckCircle/></button>
-          </div>
-
-          <button onClick={syncTime} className="w-full bg-blue-50 text-blue-600 py-3 rounded-xl font-bold">同步时间</button>
-          
-          <div className="mt-4 bg-slate-200 p-2 rounded text-[10px] font-mono h-24 overflow-auto">
-            {logs.map((l,i)=><div key={i}>{l}</div>)}
+      {/* 顶部栏 */}
+      <header className="bg-white shadow-sm sticky top-0 z-20">
+        <div className="max-w-md mx-auto px-4 h-16 flex items-center justify-between">
+          <h1 className="font-bold text-xl text-slate-800 flex items-center gap-2">
+            <Settings className="w-6 h-6 text-blue-600" />
+            InsulCtrl <span className="text-[10px] text-slate-400 font-mono bg-slate-100 px-1 rounded">{APP_VERSION}</span>
+          </h1>
+          <div className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 ${
+            connState === 'connected' ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-500'
+          }`}>
+            <div className={`w-2 h-2 rounded-full ${connState === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-slate-400'}`} />
+            {connState === 'connected' ? (isMockMode ? 'Mock' : 'Online') : 'Offline'}
           </div>
         </div>
-      )}
+      </header>
+
+      <main className="max-w-md mx-auto p-4 space-y-5">
+
+        {/* 连接页 */}
+        {connState === 'disconnected' && (
+          <div className="bg-white rounded-3xl p-8 shadow-sm text-center space-y-6 mt-10">
+            <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mx-auto ring-8 ring-blue-50/50">
+              <Bluetooth className="w-10 h-10 text-blue-600" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-slate-800">开始连接</h2>
+              <p className="text-slate-400 mt-2">控制您的 InsulCtrl 绝缘件设备</p>
+            </div>
+            
+            {!isBluetoothSupported && (
+              <div className="bg-red-50 border border-red-100 rounded-xl p-4 text-left text-sm text-red-600 space-y-2">
+                <div className="font-bold flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" />
+                  当前浏览器不支持蓝牙
+                </div>
+                <p>iOS 用户：请使用 <span className="font-bold">Bluefy</span> 浏览器 APP。</p>
+                <p>Android 用户：请使用 <span className="font-bold">Chrome</span> 浏览器。</p>
+              </div>
+            )}
+
+            <div className="space-y-3">
+              <button 
+                onClick={connectBLE} 
+                disabled={!isBluetoothSupported}
+                className={`w-full font-bold py-4 rounded-xl shadow-lg transition-transform ${
+                  isBluetoothSupported 
+                    ? 'bg-blue-600 text-white shadow-blue-200 active:scale-95' 
+                    : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                }`}
+              > 
+                扫描蓝牙设备 
+              </button> 
+              {/* Mock 模式已隐藏，仅用于开发调试 */}
+            </div>
+          </div>
+        )}
+
+        {/* 控制面板 */}
+        {connState === 'connected' && (
+          <>
+            {/* 1. 顶部状态与控制 Dashboard */}
+            <section className="grid grid-cols-2 gap-4">
+              {/* 继电器控制 */}
+              <button 
+                onClick={toggleRelay}
+                className={`relative overflow-hidden rounded-3xl p-5 text-left transition-all duration-300 shadow-sm group active:scale-95 ${
+                  deviceData.relay 
+                    ? 'bg-gradient-to-br from-red-500 to-red-600 text-white shadow-red-200' 
+                    : 'bg-white text-slate-600 hover:border-slate-300 border border-transparent'
+                }`}
+              >
+                <div className="absolute top-4 right-4 opacity-20 group-hover:opacity-40 transition-opacity">
+                  <Zap className="w-12 h-12" />
+                </div>
+                <div className="relative z-10">
+                  <div className={`p-2 rounded-xl w-fit mb-3 ${deviceData.relay ? 'bg-white/20' : 'bg-slate-100'}`}>
+                    <Zap className="w-6 h-6" />
+                  </div>
+                  <div className="text-xs font-bold opacity-80 uppercase tracking-wider mb-1">RELAY</div>
+                  <div className="text-xl font-black tracking-tight">
+                    {deviceData.relay ? 'ON' : 'OFF'}
+                  </div>
+                </div>
+              </button>
+
+              {/* 模式切换 */}
+              <button 
+                onClick={toggleArm}
+                className={`relative overflow-hidden rounded-3xl p-5 text-left transition-all duration-300 shadow-sm group active:scale-95 ${
+                  deviceData.mode === 'ARMED' 
+                    ? 'bg-gradient-to-br from-green-500 to-green-600 text-white shadow-green-200' 
+                    : 'bg-white text-slate-600 hover:border-slate-300 border border-transparent'
+                }`}
+              >
+                <div className="absolute top-4 right-4 opacity-20 group-hover:opacity-40 transition-opacity">
+                  <ShieldCheck className="w-12 h-12" />
+                </div>
+                <div className="relative z-10">
+                  <div className={`p-2 rounded-xl w-fit mb-3 ${deviceData.mode === 'ARMED' ? 'bg-white/20' : 'bg-slate-100'}`}>
+                    <ShieldCheck className="w-6 h-6" />
+                  </div>
+                  <div className="text-xs font-bold opacity-80 uppercase tracking-wider mb-1">MODE</div>
+                  <div className="text-xl font-black tracking-tight">
+                    {deviceData.mode === 'ARMED' ? 'ARMED' : 'IDLE'}
+                  </div>
+                </div>
+              </button>
+            </section>
+
+            {/* 2. 倒计时卡片 */}
+            <section className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 relative overflow-hidden">
+              <div className="flex justify-between items-start mb-4 relative z-10">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                    <Timer className="w-5 h-5 text-orange-500" />
+                    倒计时
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    {deviceData.mode === 'ARMED' ? '距离下一次自动启动' : '定时器未启动'}
+                  </p>
+                </div>
+                {deviceData.mode === 'ARMED' && (
+                  <span className="bg-orange-100 text-orange-600 text-xs font-bold px-2 py-1 rounded-lg">
+                    运行中
+                  </span>
+                )}
+              </div>
+              
+              <div className="relative z-10 text-center py-2">
+                <div className={`text-4xl font-mono font-black tracking-wider ${
+                  deviceData.mode === 'ARMED' ? 'text-slate-800' : 'text-slate-300'
+                }`}>
+                  {deviceData.mode === 'ARMED' 
+                    ? calculateCountdown(deviceData.deviceTs, deviceData.alarmH, deviceData.alarmM)
+                    : '--:--:--'
+                  }
+                </div>
+                {deviceData.mode !== 'ARMED' && (
+                  <div className="text-xs text-slate-400 mt-2">
+                    点击上方 <span className="font-bold text-slate-600">IDLE</span> 按钮以启动定时
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* 3. 参数配置区 */}
+            <section className="space-y-4">
+              <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider ml-2">Configuration</h3>
+              
+              {/* 闹钟设定 */}
+              <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className="bg-orange-50 p-3 rounded-xl text-orange-500">
+                    <AlertTriangle className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-slate-400 mb-1">定时时间</div>
+                    <div className="text-[10px] text-slate-400 font-mono mb-1">
+                      当前设备设定: <span className="text-orange-600 font-bold">{formatShortTime(deviceData.alarmH, deviceData.alarmM)}</span>
+                    </div>
+                    <div className="flex items-baseline gap-1">
+                      <select 
+                        value={pendingAlarmH} 
+                        onChange={(e) => setPendingAlarmH(e.target.value)}
+                        className="bg-transparent font-bold text-xl text-slate-800 outline-none p-0 cursor-pointer hover:text-orange-600 appearance-none"
+                      >
+                        {[...Array(24).keys()].map(h => <option key={h} value={h}>{String(h).padStart(2,'0')}</option>)}
+                      </select>
+                      <span className="text-slate-300">:</span>
+                      <select 
+                        value={pendingAlarmM} 
+                        onChange={(e) => setPendingAlarmM(e.target.value)}
+                        className="bg-transparent font-bold text-xl text-slate-800 outline-none p-0 cursor-pointer hover:text-orange-600 appearance-none"
+                      >
+                        {[...Array(60).keys()].map(m => <option key={m} value={m}>{String(m).padStart(2,'0')}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                <button 
+                  onClick={handleSetAlarm} 
+                  className="bg-slate-800 text-white p-3 rounded-xl active:scale-95 transition-transform shadow-lg shadow-slate-200"
+                  title="保存并发送"
+                >
+                  <CheckCircle className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* 时间同步 */}
+              <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className="bg-blue-50 p-3 rounded-xl text-blue-500">
+                    <Clock className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-slate-400">设备时钟</div>
+                    <div className="font-mono text-lg font-bold text-slate-700">
+                      {formatTime(deviceData.deviceTs)}
+                    </div>
+                  </div>
+                </div>
+                <button 
+                  onClick={handleSyncTime} 
+                  className="bg-blue-50 text-blue-600 p-3 rounded-xl hover:bg-blue-100 active:scale-95 transition-colors"
+                  title="同步手机时间"
+                >
+                  <RefreshCw className="w-5 h-5" />
+                </button>
+              </div>
+            </section>
+
+            {/* 4. 底部断开 */}
+            <section className="pt-4">
+              <button onClick={() => { if(server) server.disconnect(); onDisconnected(); }} className="w-full py-3 text-red-400 text-sm font-medium hover:text-red-600 flex items-center justify-center gap-2">
+                <XCircle className="w-4 h-4" /> 断开设备连接
+              </button>
+              
+              <div className="mt-4 bg-slate-200 rounded-lg p-2 h-20 overflow-y-auto text-[10px] font-mono text-slate-500">
+                {logs.map((l,i) => <div key={i}>{l}</div>)}
+              </div>
+            </section>
+
+          </>
+        )}
+      </main>
     </div>
   );
 }
