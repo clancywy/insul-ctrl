@@ -68,6 +68,9 @@ export default function InsulCtrlApp() {
   // 新增：Toast 提示状态 
   const [toast, setToast] = useState({ show: false, msg: '', type: 'success' }); 
 
+  // 版本标记，用于确认更新
+  const APP_VERSION = "Debug v2.0";
+
   const deviceDataRef = useRef(deviceData); 
   useEffect(() => { 
     deviceDataRef.current = deviceData; 
@@ -122,9 +125,11 @@ export default function InsulCtrlApp() {
       showToast("蓝牙连接成功"); 
 
     } catch (error) { 
+      console.error(error);
       addLog(`连接失败: ${error.message}`, "error"); 
       setConnState('disconnected'); 
-      showToast("连接失败: " + error.message, "error"); 
+      // 使用 alert 确保用户看到原生错误信息
+      alert(`连接失败:\n${error.message}\n\n请检查：\n1. 蓝牙是否开启\n2. (Android) 是否授予浏览器位置权限\n3. 设备是否在附近`);
     } 
   }; 
 
@@ -244,7 +249,7 @@ export default function InsulCtrlApp() {
         <div className="max-w-md mx-auto px-4 h-16 flex items-center justify-between"> 
           <h1 className="font-bold text-xl text-slate-800 flex items-center gap-2"> 
             <Settings className="w-6 h-6 text-blue-600" /> 
-            InsulCtrl 
+            InsulCtrl <span className="text-[10px] text-slate-400 font-mono bg-slate-100 px-1 rounded">{APP_VERSION}</span>
           </h1> 
           <div className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 ${ 
             connState === 'connected' ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-500' 
