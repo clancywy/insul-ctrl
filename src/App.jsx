@@ -74,7 +74,7 @@ export default function InsulCtrlApp() {
   const [toast, setToast] = useState({ show: false, msg: '', type: 'success' });
 
   // 版本标记，用于确认更新
-  const APP_VERSION = "Debug v2.3 (CN Time)";
+  const APP_VERSION = "Debug v2.4 (Fix Timezone)";
 
   // 用于 Mock 模式的回调引用
   const deviceDataRef = useRef(deviceData);
@@ -235,8 +235,7 @@ export default function InsulCtrlApp() {
     if (isMockMode) {
       setTimeout(() => { 
         if (payload.cmd === "sync_time") { 
-          // Mock 模式下，忽略 payload.ts (因为它是本地时间)，直接用 UTC 保证显示正确
-          setDeviceData(prev => ({ ...prev, deviceTs: Math.floor(Date.now() / 1000) })); 
+          setDeviceData(prev => ({ ...prev, deviceTs: payload.ts })); 
           showToast("时间同步成功"); 
         } else if (payload.cmd === "set_alarm") {
           setDeviceData(prev => ({ ...prev, alarmH: payload.h, alarmM: payload.m }));
@@ -271,18 +270,7 @@ export default function InsulCtrlApp() {
   // ========================================== 
   // 功能处理 
   // ========================================== 
-  const handleSyncTime = () => {
-    // 获取当前时间
-    const now = new Date();
-    // 计算本地时间对应的秒数（即：让设备收到 12:00 的数值，而不是 04:00）
-    // 北京时间 (UTC+8) = UTC + 8小时
-    // getTimezoneOffset() 返回分钟差 (UTC - 本地)，北京时间是 -480
-    const offsetSeconds = now.getTimezoneOffset() * 60 * -1; 
-    const localTs = Math.floor(Date.now() / 1000) + offsetSeconds;
-    
-    sendCommand({ cmd: "sync_time", ts: localTs });
-  };
-
+  const handleSyncTime = () => sendCommand({ cmd: "sync_time", ts: Math.floor(Date.now() / 1000) });
   const handleSetAlarm = () => sendCommand({ cmd: "set_alarm", h: parseInt(pendingAlarmH), m: parseInt(pendingAlarmM) });
   const toggleRelay = () => sendCommand({ cmd: "toggle_relay" });
   const toggleArm = () => sendCommand({ cmd: "toggle_arm" });
@@ -323,8 +311,8 @@ export default function InsulCtrlApp() {
       <main className="max-w-md mx-auto p-4 space-y-5">
 
         {/* Debug Banner - 仅用于调试阶段 */}
-        <div className="bg-blue-400 text-blue-900 text-center py-2 px-4 rounded-xl font-bold text-sm shadow-sm animate-pulse">
-          DEBUG v2.3 - 已修复北京时间差
+        <div className="bg-purple-400 text-purple-900 text-center py-2 px-4 rounded-xl font-bold text-sm shadow-sm animate-pulse">
+          DEBUG v2.4 - 已恢复标准 UTC 时间
         </div>
 
         {/* 连接页 */}
