@@ -101,8 +101,9 @@ export default function InsulCtrlApp() {
       setConnState('connecting'); 
       setIsMockMode(false); 
 
+      // 临时改为扫描所有设备，以排查 UUID 过滤问题
       const device = await navigator.bluetooth.requestDevice({ 
-        filters: [{ services: [SERVICE_UUID] }], 
+        acceptAllDevices: true,
         optionalServices: [SERVICE_UUID] 
       }); 
 
