@@ -62,11 +62,21 @@ export default function InsulCtrlApp() {
   const [pendingAlarmH, setPendingAlarmH] = useState(7); 
   const [pendingAlarmM, setPendingAlarmM] = useState(30); 
   
+  // 新增：检查浏览器是否支持 Web Bluetooth
+  const [isBluetoothSupported, setIsBluetoothSupported] = useState(true);
+
   // 新增：Toast 提示状态 
   const [toast, setToast] = useState({ show: false, msg: '', type: 'success' }); 
 
   const deviceDataRef = useRef(deviceData); 
-  useEffect(() => { deviceDataRef.current = deviceData; }, [deviceData]); 
+  useEffect(() => { 
+    deviceDataRef.current = deviceData; 
+    // 检查蓝牙支持
+    if (!navigator.bluetooth) {
+      setIsBluetoothSupported(false);
+      addLog("当前浏览器不支持 Web Bluetooth API", "error");
+    }
+  }, [deviceData]); 
 
   // 显示 Toast 
   const showToast = (msg, type = 'success') => { 
@@ -256,8 +266,30 @@ export default function InsulCtrlApp() {
               <h2 className="text-2xl font-bold text-slate-800">开始连接</h2> 
               <p className="text-slate-400 mt-2">控制您的 InsulCtrl 绝缘件设备</p> 
             </div> 
+
+            {/* 不支持蓝牙时的提示 */}
+            {!isBluetoothSupported && (
+              <div className="bg-red-50 border border-red-100 rounded-xl p-4 text-left text-sm text-red-600 space-y-2">
+                <div className="font-bold flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" />
+                  当前浏览器不支持蓝牙
+                </div>
+                <p>iOS 用户：请使用 <span className="font-bold">Bluefy</span> 浏览器 APP。</p>
+                <p>Android 用户：请使用 <span className="font-bold">Chrome</span> 浏览器。</p>
+                <p>PC 用户：请使用 <span className="font-bold">Chrome</span> 或 Edge。</p>
+              </div>
+            )}
+
             <div className="space-y-3"> 
-              <button onClick={connectBLE} className="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg shadow-blue-200 active:scale-95 transition-transform"> 
+              <button 
+                onClick={connectBLE} 
+                disabled={!isBluetoothSupported}
+                className={`w-full font-bold py-4 rounded-xl shadow-lg transition-transform ${
+                  isBluetoothSupported 
+                    ? 'bg-blue-600 text-white shadow-blue-200 active:scale-95' 
+                    : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                }`}
+              > 
                 扫描蓝牙设备 
               </button> 
               <button onClick={connectMock} className="w-full text-slate-400 text-sm font-medium py-2 hover:text-slate-600"> 
