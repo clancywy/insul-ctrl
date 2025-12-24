@@ -74,7 +74,7 @@ export default function InsulCtrlApp() {
   const [toast, setToast] = useState({ show: false, msg: '', type: 'success' });
 
   // 版本标记，用于确认更新
-  const APP_VERSION = "v2.5 (Stable)";
+  const APP_VERSION = "v2.6 (Packet Fix)";
 
   // 用于 Mock 模式的回调引用
   const deviceDataRef = useRef(deviceData);
@@ -255,11 +255,12 @@ export default function InsulCtrlApp() {
     }
 
     // BLE 处理
-    if (!characteristic) return;
-    try {
-      const encoder = new TextEncoder();
-      await characteristic.writeValue(encoder.encode(jsonStr));
-
+    if (!characteristic) return; 
+    try { 
+      const encoder = new TextEncoder(); 
+      // 在 jsonStr 后面加上 "#" 作为结束符，解决 BLE 粘包问题
+      await characteristic.writeValue(encoder.encode(jsonStr + "#")); 
+      
       // 发送成功后，立即更新本地状态，给用户及时的反馈
       if (payload.cmd === "sync_time") {
         setDeviceData(prev => ({ ...prev, deviceTs: payload.ts }));
