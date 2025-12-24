@@ -74,7 +74,7 @@ export default function InsulCtrlApp() {
   const [toast, setToast] = useState({ show: false, msg: '', type: 'success' });
 
   // 版本标记，用于确认更新
-  const APP_VERSION = "Debug v2.4 (Fix Timezone)";
+  const APP_VERSION = "v2.5 (Stable)";
 
   // 用于 Mock 模式的回调引用
   const deviceDataRef = useRef(deviceData);
@@ -259,8 +259,26 @@ export default function InsulCtrlApp() {
     try {
       const encoder = new TextEncoder();
       await characteristic.writeValue(encoder.encode(jsonStr));
-      // 注意：这里我们不立即 showToast，而是等待 handleNotifications 收到回包后再更新 UI
-      // 这样能确保 UI 显示的是真实硬件状态
+
+      // 发送成功后，立即更新本地状态，给用户及时的反馈
+      if (payload.cmd === "sync_time") {
+        setDeviceData(prev => ({ ...prev, deviceTs: payload.ts }));
+        showToast("时间已同步到设备");
+      } else if (payload.cmd === "set_alarm") {
+        setDeviceData(prev => ({ ...prev, alarmH: payload.h, alarmM: payload.m }));
+        showToast(`闹钟已设为 ${formatShortTime(payload.h, payload.m)}`);
+      } else if (payload.cmd === "toggle_relay") {
+        // 对于 Relay 状态，最好等待设备反馈，但这里我们乐观更新
+        setDeviceData(prev => ({ ...prev, relay: !prev.relay }));
+      } else if (payload.cmd === "toggle_arm") {
+        setDeviceData(prev => ({ 
+          ...prev, 
+          mode: prev.mode === 'ARMED' ? 'IDLE' : 'ARMED',
+          relay: false 
+        }));
+      }
+
+      showToast("指令发送成功");
     } catch (error) {
       addLog(`TX Fail: ${error.message}`, "error");
       showToast("发送失败", "error");
@@ -310,10 +328,10 @@ export default function InsulCtrlApp() {
 
       <main className="max-w-md mx-auto p-4 space-y-5">
 
-        {/* Debug Banner - 仅用于调试阶段 */}
-        <div className="bg-purple-400 text-purple-900 text-center py-2 px-4 rounded-xl font-bold text-sm shadow-sm animate-pulse">
+        {/* Debug Banner - 移除，因为功能已稳定 */}
+        {/* <div className="bg-purple-400 text-purple-900 text-center py-2 px-4 rounded-xl font-bold text-sm shadow-sm animate-pulse">
           DEBUG v2.4 - 已恢复标准 UTC 时间
-        </div>
+        </div> */}
 
         {/* 连接页 */}
         {connState === 'disconnected' && (
