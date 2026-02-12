@@ -4,6 +4,7 @@ import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: '/insul-ctrl/',
   plugins: [
     react(),
     VitePWA({
@@ -14,6 +15,8 @@ export default defineConfig({
         short_name: 'InsulCtrl',
         description: 'Bluetooth Control for InsulCtrl',
         theme_color: '#ffffff',
+        scope: '/insul-ctrl/',
+        start_url: '/insul-ctrl/',
         icons: [
           {
             src: 'vite.svg',
