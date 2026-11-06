@@ -1,16 +1,46 @@
-# React + Vite
+# 装备控制器手机端 v4.1.0
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+手机入口：https://clancywy.github.io/insul-ctrl/
 
-Currently, two official plugins are available:
+通过手机蓝牙直接连接附近的 InsulCtrl 控制器。安卓使用 Chrome，iPhone 使用支持 Web Bluetooth 的 Bluefy。页面与蓝牙连接需要分别验证；网页发布成功不代表手机或实际接触器已完成验收。
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## 当前界面与操作
 
-## React Compiler
+| 设备状态 | 状态灯 | 手机操作 |
+|---|---|---|
+| 空闲，已关机 | 绿色 | 开机、启用闹钟、保存时间、同步时间 |
+| 设置 | 橙色 | 在控制器旋钮上完成设置 |
+| 闹钟，等待自动开机 | 蓝色 | 取消闹钟 |
+| 正在开机 | 红色 | 关机 |
+| 已开机 | 红色 | 关机 |
+| 等待释放 | 绿色 | 可再次发送关机，禁止启动和修改设置 |
+| 故障 | 粉红色 | 关机；反馈故障在输出关闭且反馈释放后可确认 |
+| 状态缺失或过期 | 不显示未经确认的设备灯色 | 仅保留关机，等待状态恢复或重新连接 |
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+手机按钮点击即执行，关机同时取消闹钟。2 秒和 10 秒长按仅属于实体旋钮操作，手机不会延迟停止命令。时间设置在空闲时修改；RTC、保存和配置故障时保留相应修复入口。
 
-## Expanding the ESLint configuration
+“已开机”必须同时获得输出开启、DI=1、反馈阶段已确认三个条件。仅收到开启命令时显示“正在开机”。等待释放不表示接触器已经释放。连接状态与设备状态灯分开显示。
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+触发时间使用控制器回传的实际目标时刻，按 UTC+8 显示，字号与当前时间一致。闹钟过零不会自动跳到第二天。掉电后保留保存时间，但需要手动重新启用。
+
+## 开发与验证
+
+```text
+npm ci
+npm test
+npm run lint
+npm run build
+npm run preview -- --host 127.0.0.1 --port 4173
+```
+
+本机预览：http://127.0.0.1:4173/insul-ctrl/ 。这个回环地址仅供电脑自身使用；手机使用上面的 HTTPS 入口。Windows 也可运行“启动手机端预览.cmd”。
+
+现有 GitHub Actions 在 main 更新后构建并发布 GitHub Pages。版本标记在页面顶部；更新后应显示 v4.1.0。如仍为旧版本，关闭页面后重新打开，等待服务工作线程更新，再刷新一次。
+
+## 协议
+
+BLE 服务 `0000aaaa-0000-1000-8000-00805f9b34fb`，命令特征 `0000bbbb-0000-1000-8000-00805f9b34fb`。每次连接或重连发送 `Q`，订阅 `S/D/F/C/N` 详细回读。保留 `R:0/1`、`M:0/1`、`A:HH:MM`、`T:Unix秒` 和 `F:0` 故障确认。
+
+状态、故障、DI 和时钟帧分别检查 3 秒有效期。任何一类过期时禁止开启；单独时钟心跳不能延长旧 DI 状态的有效期。GATT 写入串行执行，停止清除尚未发送的普通命令，断线废弃旧连接队列。页面不使用模拟设备或手机时间代替控制器回读。
+
+此版本完成自动协议/状态检查和后台浏览器模拟 BLE 检查；真实手机蓝牙和接触器反馈仍需现场联调。

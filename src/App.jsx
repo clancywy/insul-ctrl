@@ -1,532 +1,228 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Bluetooth, Clock, Settings, Zap, ShieldCheck, 
-  RefreshCw, CheckCircle, AlertTriangle, Timer, XCircle, Info 
-} from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Bluetooth, Clock, Settings, Power, ShieldCheck, RefreshCw, CheckCircle, AlertTriangle, Timer, XCircle } from 'lucide-react';
+import { initialDevice, parseFrame, errorMessage, deviceSeconds, countdown, canStart, statusFresh, canConfigure, canAcknowledge } from './protocol.js';
+import { CommandQueue } from './commandQueue.js';
+import { displayState, triggerTime, LAMPS } from './presentation.js';
 
-// ==========================================
-// BLE 协议常量定义
-// ==========================================
-const SERVICE_UUID = "0000aaaa-0000-1000-8000-00805f9b34fb";
-const CHAR_UUID_CMD = "0000bbbb-0000-1000-8000-00805f9b34fb"; 
-
-// ==========================================
-// 辅助工具函数
-// ==========================================
-const formatTime = (ts) => {
-  if (!ts) return "--:--:--";
-  const date = new Date(ts * 1000);
-  return date.toLocaleTimeString('en-GB', { hour12: false });
-};
-
-const formatShortTime = (h, m) => {
-  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
-};
-
-const calculateCountdown = (deviceTs, alarmH, alarmM) => {
-  if (!deviceTs) return "--:--:--";
-  const now = new Date(deviceTs * 1000);
-  let alarm = new Date(deviceTs * 1000);
-  alarm.setHours(alarmH, alarmM, 0, 0);
-  
-  if (alarm <= now) {
-    alarm.setDate(alarm.getDate() + 1);
-  }
-  
-  const diff = alarm - now;
-  const h = Math.floor(diff / 3600000);
-  const m = Math.floor((diff % 3600000) / 60000);
-  const s = Math.floor((diff % 60000) / 1000);
-  
-  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-};
+const SERVICE_UUID = '0000aaaa-0000-1000-8000-00805f9b34fb';
+const CHAR_UUID_CMD = '0000bbbb-0000-1000-8000-00805f9b34fb';
+const formatTime = ts => ts ? new Date(ts*1000).toLocaleTimeString('en-GB', { hour12:false, timeZone:'Asia/Shanghai' }) : '--:--:--';
+const formatShortTime = (h,m) => `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
 
 export default function InsulCtrlApp() {
-  // ==========================================
-  // 应用状态
-  // ==========================================
-  const [connState, setConnState] = useState('disconnected'); 
-  const [device, setDevice] = useState(null);
-  const [server, setServer] = useState(null);
-  const [characteristic, setCharacteristic] = useState(null);
-  
-  const [deviceData, setDeviceData] = useState({
-    mode: "IDLE", 
-    relay: false,
-    alarmH: 7,
-    alarmM: 30,
-    deviceTs: Math.floor(Date.now() / 1000), 
-    lastUpdate: 0,
-  });
-
-  const [logs, setLogs] = useState([]);
-  const [isMockMode, setIsMockMode] = useState(false);
-  const [pendingAlarmH, setPendingAlarmH] = useState(7);
-  const [pendingAlarmM, setPendingAlarmM] = useState(30);
-  
-  const [isBluetoothSupported, setIsBluetoothSupported] = useState(true);
-  const [toast, setToast] = useState({ show: false, msg: '', type: 'success' });
-
-  // 版本标记，用于确认更新
-  const APP_VERSION = "v3.0 Final";
-
-  const deviceDataRef = useRef(deviceData);
-  useEffect(() => { 
-    deviceDataRef.current = deviceData;
-    if (!navigator.bluetooth) {
-      setIsBluetoothSupported(false);
-      addLog("当前浏览器不支持 Web Bluetooth API", "error");
+  const [connState,setConnState]=useState('disconnected');
+  const [deviceData,setDeviceData]=useState(initialDevice);
+  const [logs,setLogs]=useState([]);
+  const [pendingAlarmH,setPendingAlarmH]=useState(7);
+  const [pendingAlarmM,setPendingAlarmM]=useState(30);
+  const [toast,setToast]=useState({show:false,msg:'',type:'success'});
+  const [now,setNow]=useState(()=>performance.now());
+  const isBluetoothSupported=Boolean(navigator.bluetooth);
+  const APP_VERSION='v4.1.0';
+  const connection=useRef(null);
+  const toastTimer=useRef(null);
+  useEffect(()=>{
+    const timer=setInterval(()=>setNow(performance.now()),250);
+    return ()=>{
+      clearInterval(timer); clearTimeout(toastTimer.current);
+      const c=connection.current;
+      if(c) { c.queue?.close(); c.char?.removeEventListener('characteristicvaluechanged',c.notify); c.device.removeEventListener('gattserverdisconnected',c.disconnected); c.device.gatt.disconnect(); }
+    };
+  },[]);
+  const showToast=(msg,type='success')=>{
+    clearTimeout(toastTimer.current);
+    setToast({show:true,msg,type});
+    toastTimer.current=setTimeout(()=>setToast(p=>({...p,show:false})),3500);
+  };
+  const addLog=msg=>setLogs(p=>[...p.slice(-29),msg]);
+  const onDisconnected=()=>{
+    const c=connection.current;
+    if(c) {
+      c.queue?.close(); c.char?.removeEventListener('characteristicvaluechanged',c.notify);
+      c.device.removeEventListener('gattserverdisconnected',c.disconnected);
+      c.device.gatt.disconnect();
     }
-  }, [deviceData]);
-
-  // 显示 Toast
-  const showToast = (msg, type = 'success') => {
-    setToast({ show: true, msg, type });
-    setTimeout(() => setToast(prev => ({ ...prev, show: false })), 3000);
+    connection.current=null;
+    setConnState('disconnected'); setDeviceData(initialDevice());
+    addLog('设备已断开');
   };
-
-  // ========================================== 
-  // 日志 (保留但默认隐藏)
-  // ========================================== 
-  const addLog = (msg, type = 'info') => { 
-    // console.log(`[${type}] ${msg}`); // 生产环境仅在控制台输出
-  };
-
-  // ==========================================
-  // 核心：短协议解析逻辑 (New!)
-  // ==========================================
-  const handleNotifications = (event) => {
-    const value = event.target.value;
-    const decoder = new TextDecoder('utf-8');
+  const connectBLE=async()=>{
+    let c;
     try {
-      const rawStr = decoder.decode(value);
-      // 协议格式: S:模式Code,继电器(0/1),时,分
-      // 模式Code: 0=IDLE, 1=ARMED, 2=ON
-      
-      if (rawStr.startsWith("S:")) {
-        const parts = rawStr.substring(2).split(",");
-        if (parts.length >= 4) {
-          const modeCode = parseInt(parts[0]);
-          const relayVal = parseInt(parts[1]);
-          const hh = parseInt(parts[2]);
-          const mm = parseInt(parts[3]);
-
-          // 映射回 UI 需要的字符串状态
-          let modeStr = "IDLE";
-          if (modeCode === 1) modeStr = "ARMED";
-          if (modeCode === 2) modeStr = "ON"; // 实际上 ON 时 UI 也显示 ARMED 样式比较好，或者单独处理
-
-          setDeviceData(prev => ({
-            ...prev,
-            mode: modeStr,
-            relay: relayVal === 1,
-            alarmH: hh,
-            alarmM: mm,
-            deviceTs: Math.floor(Date.now() / 1000), // 使用手机时间校准显示
-            lastUpdate: Date.now()
-          }));
+      setConnState('connecting'); setDeviceData(initialDevice());
+      const device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'InsulCtrl'}],optionalServices:[SERVICE_UUID]});
+      c={device}; connection.current=c;
+      c.disconnected=()=>{ if(connection.current===c) onDisconnected(); };
+      device.addEventListener('gattserverdisconnected',c.disconnected);
+      const server=await device.gatt.connect();
+      const service=await server.getPrimaryService(SERVICE_UUID);
+      c.char=await service.getCharacteristic(CHAR_UUID_CMD);
+      let firstStatus=true;
+      c.notify=event=>{
+        if(connection.current!==c) return;
+        const raw=new TextDecoder().decode(event.target.value).trim();
+        const error=errorMessage(raw);
+        if(error) { showToast(error,'error'); addLog(error); return; }
+        const patch=parseFrame(raw,performance.now());
+        if(!patch) return;
+        setDeviceData(p=>({...p,...patch}));
+        if(firstStatus && raw.startsWith('S:')) {
+          firstStatus=false; setPendingAlarmH(patch.alarmH); setPendingAlarmM(patch.alarmM);
         }
-      }
-    } catch (error) {
-      console.error("Parse Error", error);
-    }
-  };
-
-  // ==========================================
-  // BLE 连接逻辑
-  // ==========================================
-  const connectBLE = async () => {
-    try {
-      addLog("正在扫描蓝牙设备...", "info");
-      setConnState('connecting');
-      setIsMockMode(false);
-
-      // 临时改为扫描所有设备，以排查 UUID 过滤问题 (保留，防止兼容性问题)
-      const device = await navigator.bluetooth.requestDevice({
-        acceptAllDevices: true,
-        optionalServices: [SERVICE_UUID]
-      });
-
-      addLog(`找到设备: ${device.name}`, "success");
-      setDevice(device);
-      device.addEventListener('gattserverdisconnected', onDisconnected);
-
-      const server = await device.gatt.connect();
-      setServer(server);
-      const service = await server.getPrimaryService(SERVICE_UUID);
-      const char = await service.getCharacteristic(CHAR_UUID_CMD);
-      
-      // 开启通知监听 (关键)
-      await char.startNotifications();
-      char.addEventListener('characteristicvaluechanged', handleNotifications);
-      addLog("数据监听已开启", "info");
-
-      setCharacteristic(char);
+      };
+      c.char.addEventListener('characteristicvaluechanged',c.notify);
+      await c.char.startNotifications();
+      if(connection.current!==c) throw new Error('连接已断开');
+      c.queue=new CommandQueue(command=>c.char.writeValue(new TextEncoder().encode(command)));
       setConnState('connected');
-      addLog("连接成功", "success");
-      showToast("蓝牙连接成功");
-
-    } catch (error) {
-      console.error(error);
-      addLog(`连接失败: ${error.message}`, "error");
-      setConnState('disconnected');
-      alert(`连接失败:\n${error.message}`);
+      await c.queue.send('Q');
+      addLog('已连接，已请求设备状态');
+    } catch(error) {
+      if(!c || connection.current===c) onDisconnected();
+      showToast(`连接失败：${error.message}`,'error');
     }
   };
-
-  const onDisconnected = () => {
-    addLog("设备已断开", "warn");
-    setConnState('disconnected');
-    setDevice(null);
-    setServer(null);
-    setCharacteristic(null);
-    showToast("设备已断开连接", "error");
+  const sendCommand=async command=>{
+    const c=connection.current;
+    if(!c?.queue) return;
+    try { await c.queue.send(command); addLog(`已发送 ${command}`); }
+    catch(error) { showToast(error.message,'error'); addLog(error.message); }
   };
-
-  // ==========================================
-  // Mock 逻辑 (适配短协议)
-  // ==========================================
-  const connectMock = () => {
-    setIsMockMode(true);
-    setConnState('connecting');
-    setTimeout(() => {
-      setConnState('connected');
-      addLog("Mock 设备已连接", "success");
-      showToast("虚拟设备已连接");
-      startMockHeartbeat();
-    }, 600);
-  };
-
-  const mockIntervalRef = useRef(null);
-  const startMockHeartbeat = () => {
-    if (mockIntervalRef.current) clearInterval(mockIntervalRef.current);
-    mockIntervalRef.current = setInterval(() => {
-      setDeviceData(prev => {
-        let nextTs = prev.deviceTs + 1;
-        let nextRelay = prev.relay;
-        let nextMode = prev.mode;
-        
-        if (prev.mode === 'ARMED') {
-           const now = new Date(nextTs * 1000);
-           if (now.getHours() === prev.alarmH && now.getMinutes() === prev.alarmM && now.getSeconds() === 0) {
-             nextRelay = true;
-             nextMode = 'ON'; // 模拟触发
-             addLog("Mock: 闹钟触发!", "warn");
-             showToast("闹钟触发！", "error"); 
-           }
-        }
-        return { ...prev, deviceTs: nextTs, relay: nextRelay, mode: nextMode };
-      });
-    }, 1000);
-  };
-
-  // ==========================================
-  // 指令发送 (升级为短协议)
-  // ==========================================
-  const sendCommand = async (cmdStr) => {
-    addLog(`TX: ${cmdStr}`, "tx");
-
-    if (isMockMode) {
-      // Mock 逻辑简单模拟回显
-      setTimeout(() => {
-        if (cmdStr.startsWith("T:")) {
-           showToast("时间同步成功");
-        } else if (cmdStr.startsWith("A:")) {
-           const [_, h, m] = cmdStr.split(":");
-           setDeviceData(p => ({...p, alarmH: parseInt(h), alarmM: parseInt(m)}));
-           showToast(`闹钟设为 ${h}:${m}`);
-        } else if (cmdStr.startsWith("R:")) {
-           const val = cmdStr.split(":")[1] === "1";
-           setDeviceData(p => ({...p, relay: val}));
-           showToast(val ? "继电器吸合" : "继电器断开");
-        } else if (cmdStr.startsWith("M:")) {
-           const val = cmdStr.split(":")[1] === "1";
-           setDeviceData(p => ({...p, mode: val ? "ARMED" : "IDLE", relay: false}));
-           showToast(val ? "已武装 (ARMED)" : "已取消 (IDLE)");
-        }
-      }, 100);
-      return;
-    }
-
-    if (!characteristic) return;
-    try {
-      const encoder = new TextEncoder();
-      // 直接发送短字符串，无需 JSON，无需 # 结束符(因为长度<20字节)
-      await characteristic.writeValue(encoder.encode(cmdStr));
-      // 注意：不立即弹Toast，等待设备回传 S:... 状态包来更新界面
-    } catch (error) {
-      addLog(`TX Fail: ${error.message}`, "error");
-      showToast("发送失败", "error");
-    }
-  };
-
-  // ==========================================
-  // 功能处理 (构造短指令)
-  // ==========================================
-  const handleSyncTime = () => {
-    const ts = Math.floor(Date.now() / 1000);
-    sendCommand(`T:${ts}`);
-  };
-
-  const handleSetAlarm = () => {
-    const h = String(pendingAlarmH).padStart(2, '0');
-    const m = String(pendingAlarmM).padStart(2, '0');
-    sendCommand(`A:${h}:${m}`);
-  };
-
-  const toggleRelay = () => {
-    // 根据当前状态取反
-    const nextVal = deviceData.relay ? "0" : "1";
-    sendCommand(`R:${nextVal}`);
-  };
-
-  const toggleArm = () => {
-    // 根据当前状态取反
-    const nextVal = deviceData.mode === 'ARMED' ? "0" : "1";
-    sendCommand(`M:${nextVal}`);
-  };
-
-  // ==========================================
-  // 渲染 (保持原版高颜值 UI)
-  // ==========================================
+  const fresh=statusFresh(deviceData,now);
+  const display=displayState(deviceData,now);
+  const lamp=LAMPS[display.lamp];
+  const configureAllowed=canConfigure(deviceData,now);
+  const startAllowed=canStart(deviceData,now);
+  const handleSyncTime=()=>sendCommand(`T:${Math.floor(Date.now()/1000)}`);
+  const handleSetAlarm=()=>sendCommand(`A:${formatShortTime(pendingAlarmH,pendingAlarmM)}`);
   return (
-    <div className="min-h-screen bg-slate-100 font-sans text-slate-800 pb-10 relative select-none">
-      
-      {/* --- Toast 通知 --- */}
-      <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 transition-all duration-300 ${toast.show ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4 pointer-events-none'}`}>
-        <div className={`px-4 py-3 rounded-xl shadow-lg flex items-center gap-2 text-sm font-bold ${
-          toast.type === 'error' ? 'bg-red-500 text-white' : 'bg-slate-800 text-white'
-        }`}>
-          {toast.type === 'success' && <CheckCircle className="w-4 h-4" />}
-          {toast.type === 'error' && <AlertTriangle className="w-4 h-4" />}
-          {toast.msg}
-        </div>
-      </div>
-
-      {/* 顶部栏 */}
+    <div className="min-h-screen bg-slate-100 font-sans text-slate-800 pb-8 relative">
+      {toast.show && <div role="status" className={`fixed top-3 left-4 right-4 mx-auto max-w-md z-50 px-4 py-3 rounded-xl shadow-lg text-sm font-medium ${toast.type === 'error' ? 'bg-red-600 text-white' : 'bg-slate-800 text-white'}`}>
+        {toast.msg}
+      </div>}
       <header className="bg-white shadow-sm sticky top-0 z-20">
-        <div className="max-w-md mx-auto px-4 h-16 flex items-center justify-between">
-          <h1 className="font-bold text-xl text-slate-800 flex items-center gap-2">
-            <Settings className="w-6 h-6 text-blue-600" />
-            InsulCtrl <span className="text-[10px] text-slate-400 font-mono bg-slate-100 px-1 rounded">{APP_VERSION}</span>
-          </h1>
-          <div className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 ${
-            connState === 'connected' ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-500'
-          }`}>
-            <div className={`w-2 h-2 rounded-full ${connState === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-slate-400'}`} />
-            {connState === 'connected' ? (isMockMode ? 'Mock' : 'Online') : 'Offline'}
+        <div className="max-w-md mx-auto px-4 h-16 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Settings className="w-5 h-5 text-blue-600 shrink-0" />
+            <h1 className="font-bold text-lg whitespace-nowrap">装备控制器</h1>
+            <span className="text-xs text-slate-500 font-mono">{APP_VERSION}</span>
           </div>
+          <span className="text-xs text-slate-600 whitespace-nowrap" aria-label="蓝牙连接状态">
+            {connState === 'connected' ? (fresh ? '蓝牙在线' : '等待状态') : connState === 'connecting' ? '连接中' : '未连接'}
+          </span>
         </div>
       </header>
-
-      <main className="max-w-md mx-auto p-4 space-y-5">
-
-        {/* 连接页 */}
+      <main className="max-w-md mx-auto p-4 space-y-4">
         {connState === 'disconnected' && (
-          <div className="bg-white rounded-3xl p-8 shadow-sm text-center space-y-6 mt-10">
-            <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mx-auto ring-8 ring-blue-50/50">
+          <section className="bg-white rounded-3xl p-6 shadow-sm text-center space-y-6 mt-6">
+            <div className="w-20 h-20 bg-blue-50 rounded-full flex items-center justify-center mx-auto">
               <Bluetooth className="w-10 h-10 text-blue-600" />
             </div>
             <div>
-              <h2 className="text-2xl font-bold text-slate-800">开始连接</h2>
-              <p className="text-slate-400 mt-2">控制您的 InsulCtrl 绝缘件设备</p>
+              <h2 className="text-2xl font-bold">连接控制器</h2>
+              <p className="text-slate-600 mt-2">查看开关机反馈，设置定时开机。</p>
             </div>
-            
-            {!isBluetoothSupported && (
-              <div className="bg-red-50 border border-red-100 rounded-xl p-4 text-left text-sm text-red-600 space-y-2">
-                <div className="font-bold flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4" />
-                  当前浏览器不支持蓝牙
-                </div>
-                <p>iOS 用户：请使用 <span className="font-bold">Bluefy</span> 浏览器 APP。</p>
-                <p>Android 用户：请使用 <span className="font-bold">Chrome</span> 浏览器。</p>
+            {!isBluetoothSupported && <div role="alert" className="bg-amber-50 rounded-xl p-4 text-left text-sm text-amber-900 space-y-2">
+              <p className="font-bold">当前浏览器无法连接蓝牙</p>
+              <p>iPhone 请用 Bluefy，安卓请用 Chrome，并通过 HTTPS 打开此页面。</p>
+            </div>}
+            <button onClick={connectBLE} disabled={!isBluetoothSupported} className="w-full font-bold py-4 rounded-xl bg-blue-600 text-white disabled:bg-slate-300 disabled:text-slate-600 active:scale-[.98]">
+              扫描蓝牙设备
+            </button>
+            <p className="text-sm text-slate-500">请开启手机蓝牙，并靠近控制器。</p>
+          </section>
+        )}
+        {connState === 'connecting' && <div role="status" className="bg-white rounded-2xl p-6 text-center">正在连接设备…</div>}
+        {connState === 'connected' && <>
+          <section aria-label="设备状态" className="bg-white rounded-3xl p-5 shadow-sm space-y-4">
+            <div className="flex justify-between items-start gap-3">
+              <div>
+                <div className="text-sm text-slate-500 mb-1">设备状态</div>
+                <h2 data-testid="state-title" className="text-3xl font-bold tracking-tight">{display.title}</h2>
               </div>
-            )}
-
-            <div className="space-y-3">
-              <button 
-                onClick={connectBLE} 
-                disabled={!isBluetoothSupported}
-                className={`w-full font-bold py-4 rounded-xl shadow-lg transition-transform ${
-                  isBluetoothSupported 
-                    ? 'bg-blue-600 text-white shadow-blue-200 active:scale-95' 
-                    : 'bg-slate-300 text-slate-500 cursor-not-allowed'
-                }`}
-              > 
-                扫描蓝牙设备 
-              </button> 
-              {/* Mock 模式已隐藏，仅用于开发调试 */}
+              {lamp ? <div aria-label={`状态灯：${lamp.name}`} className="flex items-center gap-2 rounded-full bg-slate-50 px-3 py-2 text-sm whitespace-nowrap">
+                <span data-testid="status-lamp" className="w-3.5 h-3.5 rounded-full border border-black/10" style={{backgroundColor:lamp.rgb}} />
+                {lamp.name}
+              </div> : <span className="text-sm text-slate-500 pt-2">状态待确认</span>}
             </div>
-          </div>
-        )}
+            <p className={display.key === 'FAULT' ? 'text-pink-700 font-medium' : 'text-slate-600'} role={display.key === 'FAULT' ? 'alert' : undefined}>{display.detail}</p>
+            {display.key === 'FAULT' && <p className="text-sm text-slate-600">{deviceData.relay ? '输出尚未确认关闭，请关机。' : '控制器输出已关闭；接触器状态以反馈为准。'}</p>}
+            <div className="pt-3 border-t border-slate-100">
+              <div className="text-sm text-slate-500">当前时间</div>
+              <div data-testid="device-clock" className="text-[clamp(2.25rem,11vw,3rem)] leading-tight font-mono font-bold tabular-nums mt-1">
+                {formatTime(fresh ? deviceSeconds(deviceData,now) : 0)}
+              </div>
+            </div>
+          </section>
 
-        {/* 控制面板 */}
-        {connState === 'connected' && (
-          <>
-            {/* 1. 顶部状态与控制 Dashboard */}
-            <section className="grid grid-cols-2 gap-4">
-              {/* 继电器控制 */}
-              <button 
-                onClick={toggleRelay}
-                className={`relative overflow-hidden rounded-3xl p-5 text-left transition-all duration-300 shadow-sm group active:scale-95 ${
-                  deviceData.relay 
-                    ? 'bg-gradient-to-br from-red-500 to-red-600 text-white shadow-red-200' 
-                    : 'bg-white text-slate-600 hover:border-slate-300 border border-transparent'
-                }`}
-              >
-                <div className="absolute top-4 right-4 opacity-20 group-hover:opacity-40 transition-opacity">
-                  <Zap className="w-12 h-12" />
-                </div>
-                <div className="relative z-10">
-                  <div className={`p-2 rounded-xl w-fit mb-3 ${deviceData.relay ? 'bg-white/20' : 'bg-slate-100'}`}>
-                    <Zap className="w-6 h-6" />
-                  </div>
-                  <div className="text-xs font-bold opacity-80 uppercase tracking-wider mb-1">RELAY</div>
-                  <div className="text-xl font-black tracking-tight">
-                    {deviceData.relay ? 'ON' : 'OFF'}
-                  </div>
-                </div>
+          <section aria-label="控制操作" className="space-y-3">
+            {display.key === 'IDLE' && <div className="grid grid-cols-2 gap-3">
+              <button onClick={()=>sendCommand('R:1')} disabled={!startAllowed} className="flex items-center justify-center gap-2 rounded-2xl bg-red-600 text-white font-bold py-4 disabled:opacity-40 active:scale-[.98]">
+                <Power className="w-5 h-5" />开机
               </button>
-
-              {/* 模式切换 */}
-              <button 
-                onClick={toggleArm}
-                className={`relative overflow-hidden rounded-3xl p-5 text-left transition-all duration-300 shadow-sm group active:scale-95 ${
-                  deviceData.mode === 'ARMED' 
-                    ? 'bg-gradient-to-br from-green-500 to-green-600 text-white shadow-green-200' 
-                    : 'bg-white text-slate-600 hover:border-slate-300 border border-transparent'
-                }`}
-              >
-                <div className="absolute top-4 right-4 opacity-20 group-hover:opacity-40 transition-opacity">
-                  <ShieldCheck className="w-12 h-12" />
-                </div>
-                <div className="relative z-10">
-                  <div className={`p-2 rounded-xl w-fit mb-3 ${deviceData.mode === 'ARMED' ? 'bg-white/20' : 'bg-slate-100'}`}>
-                    <ShieldCheck className="w-6 h-6" />
-                  </div>
-                  <div className="text-xs font-bold opacity-80 uppercase tracking-wider mb-1">MODE</div>
-                  <div className="text-xl font-black tracking-tight">
-                    {deviceData.mode === 'ARMED' ? 'ARMED' : 'IDLE'}
-                  </div>
-                </div>
+              <button onClick={()=>sendCommand('M:1')} disabled={!startAllowed} className="flex items-center justify-center gap-2 rounded-2xl bg-blue-600 text-white font-bold py-4 disabled:opacity-40 active:scale-[.98]">
+                <ShieldCheck className="w-5 h-5" />启用闹钟
               </button>
-            </section>
+            </div>}
+            {display.key === 'ARMED' && <button onClick={()=>sendCommand('M:0')} className="w-full rounded-2xl bg-blue-600 text-white font-bold py-4 active:scale-[.98]">取消闹钟</button>}
+            {['ON','PICKUP','RELEASE','FAULT','WAIT'].includes(display.key) && <button onClick={()=>sendCommand('R:0')} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-red-600 text-white font-bold py-4 active:scale-[.98]">
+              <Power className="w-5 h-5" />关机
+            </button>}
+            {display.key === 'SETTING' && <p className="text-sm text-amber-800 bg-amber-50 rounded-xl p-3">请先在控制器上保存设置，再使用手机操作。</p>}
+            {display.key === 'FAULT' && deviceData.feedbackFault > 0 && <button onClick={()=>sendCommand('F:0')} disabled={!canAcknowledge(deviceData,now)} className="w-full rounded-xl border border-pink-300 bg-pink-50 text-pink-800 font-bold py-3 disabled:opacity-40">确认故障已恢复</button>}
+            <p className="text-sm text-slate-500 text-center">手机按钮点击即执行，关机同时取消闹钟。</p>
+          </section>
 
-            {/* 2. 倒计时卡片 */}
-            <section className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 relative overflow-hidden">
-              <div className="flex justify-between items-start mb-4 relative z-10">
-                <div>
-                  <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                    <Timer className="w-5 h-5 text-orange-500" />
-                    倒计时
-                  </h3>
-                  <p className="text-xs text-slate-400 mt-1">
-                    {deviceData.mode === 'ARMED' ? '距离下一次自动启动' : '定时器未启动'}
-                  </p>
-                </div>
-                {deviceData.mode === 'ARMED' && (
-                  <span className="bg-orange-100 text-orange-600 text-xs font-bold px-2 py-1 rounded-lg">
-                    运行中
-                  </span>
-                )}
-              </div>
-              
-              <div className="relative z-10 text-center py-2">
-                <div className={`text-4xl font-mono font-black tracking-wider ${
-                  deviceData.mode === 'ARMED' ? 'text-slate-800' : 'text-slate-300'
-                }`}>
-                  {deviceData.mode === 'ARMED' 
-                    ? calculateCountdown(deviceData.deviceTs, deviceData.alarmH, deviceData.alarmM)
-                    : '--:--:--'
-                  }
-                </div>
-                {deviceData.mode !== 'ARMED' && (
-                  <div className="text-xs text-slate-400 mt-2">
-                    点击上方 <span className="font-bold text-slate-600">IDLE</span> 按钮以启动定时
-                  </div>
-                )}
-              </div>
-            </section>
+          <section aria-label="闹钟时间" className="bg-white rounded-3xl p-5 shadow-sm">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-base font-semibold flex items-center gap-2"><Timer className="w-5 h-5 text-blue-600" />{display.key === 'ARMED' ? '触发时间' : '闹钟时间'}</h2>
+              <span className="text-sm text-slate-500">{display.key === 'ARMED' ? '已启用' : '未启用'}</span>
+            </div>
+            <div data-testid="alarm-time" className="text-[clamp(2.25rem,11vw,3rem)] leading-tight font-mono font-bold tabular-nums mt-3">
+              {fresh ? (display.key === 'ARMED' ? triggerTime(deviceData,now) : formatShortTime(deviceData.alarmH,deviceData.alarmM)) : '--:--'}
+            </div>
+            {display.key === 'ARMED' ? <p className="text-sm text-blue-700 mt-2">距开机 <span className="font-mono tabular-nums">{countdown(deviceData,now)}</span></p> : <p className="text-sm text-slate-500 mt-2">保存的时间会保留，重新上电后需手动启用闹钟。</p>}
+          </section>
 
-            {/* 3. 参数配置区 */}
-            <section className="space-y-4">
-              <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider ml-2">Configuration</h3>
-              
-              {/* 闹钟设定 */}
-              <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <div className="bg-orange-50 p-3 rounded-xl text-orange-500">
-                    <AlertTriangle className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <div className="text-xs font-bold text-slate-400 mb-1">定时时间</div>
-                    <div className="text-[10px] text-slate-400 font-mono mb-1">
-                      当前设备设定: <span className="text-orange-600 font-bold">{formatShortTime(deviceData.alarmH, deviceData.alarmM)}</span>
-                    </div>
-                    <div className="flex items-baseline gap-1">
-                      <select 
-                        value={pendingAlarmH} 
-                        onChange={(e) => setPendingAlarmH(e.target.value)}
-                        className="bg-transparent font-bold text-xl text-slate-800 outline-none p-0 cursor-pointer hover:text-orange-600 appearance-none"
-                      >
-                        {[...Array(24).keys()].map(h => <option key={h} value={h}>{String(h).padStart(2,'0')}</option>)}
-                      </select>
-                      <span className="text-slate-300">:</span>
-                      <select 
-                        value={pendingAlarmM} 
-                        onChange={(e) => setPendingAlarmM(e.target.value)}
-                        className="bg-transparent font-bold text-xl text-slate-800 outline-none p-0 cursor-pointer hover:text-orange-600 appearance-none"
-                      >
-                        {[...Array(60).keys()].map(m => <option key={m} value={m}>{String(m).padStart(2,'0')}</option>)}
-                      </select>
-                    </div>
-                  </div>
-                </div>
-                <button 
-                  onClick={handleSetAlarm} 
-                  className="bg-slate-800 text-white p-3 rounded-xl active:scale-95 transition-transform shadow-lg shadow-slate-200"
-                  title="保存并发送"
-                >
-                  <CheckCircle className="w-5 h-5" />
-                </button>
+          <section aria-label="设置" className="bg-white rounded-3xl p-5 shadow-sm space-y-5">
+            <h2 className="font-semibold text-base">设置</h2>
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <span className="text-sm text-slate-600">闹钟时间</span>
+                <span className="text-sm text-slate-500">设备已保存 {fresh ? formatShortTime(deviceData.alarmH,deviceData.alarmM) : '--:--'}</span>
               </div>
-
-              {/* 时间同步 */}
-              <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <div className="bg-blue-50 p-3 rounded-xl text-blue-500">
-                    <Clock className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <div className="text-xs font-bold text-slate-400">设备时钟</div>
-                    <div className="font-mono text-lg font-bold text-slate-700">
-                      {formatTime(deviceData.deviceTs)}
-                    </div>
-                  </div>
-                </div>
-                <button 
-                  onClick={handleSyncTime} 
-                  className="bg-blue-50 text-blue-600 p-3 rounded-xl hover:bg-blue-100 active:scale-95 transition-colors"
-                  title="同步手机时间"
-                >
-                  <RefreshCw className="w-5 h-5" />
-                </button>
+              <div className="flex items-center gap-2">
+                <select aria-label="小时" value={pendingAlarmH} onChange={e=>setPendingAlarmH(e.target.value)} disabled={!configureAllowed} className="min-w-0 flex-1 rounded-xl bg-slate-100 p-3 text-xl font-mono font-bold disabled:opacity-50">
+                  {[...Array(24).keys()].map(h=><option key={h} value={h}>{String(h).padStart(2,'0')}</option>)}
+                </select>
+                <span className="font-bold">:</span>
+                <select aria-label="分钟" value={pendingAlarmM} onChange={e=>setPendingAlarmM(e.target.value)} disabled={!configureAllowed} className="min-w-0 flex-1 rounded-xl bg-slate-100 p-3 text-xl font-mono font-bold disabled:opacity-50">
+                  {[...Array(60).keys()].map(m=><option key={m} value={m}>{String(m).padStart(2,'0')}</option>)}
+                </select>
+                <button onClick={handleSetAlarm} disabled={!configureAllowed} className="rounded-xl bg-slate-800 text-white px-4 py-3 font-semibold disabled:opacity-40">保存</button>
               </div>
-            </section>
+              {!configureAllowed && <p className="text-sm text-slate-500 mt-2">回到空闲并确认反馈正常后，可修改设置。</p>}
+            </div>
+            <div className="border-t border-slate-100 pt-4 flex items-center justify-between gap-2">
+              <div className="text-sm text-slate-600 flex items-center gap-2"><Clock className="w-4 h-4 shrink-0" />设备时钟 · UTC+8</div>
+              <button onClick={handleSyncTime} disabled={!configureAllowed} className="flex items-center gap-1.5 rounded-xl bg-blue-50 text-blue-700 px-3 py-3 text-sm font-semibold disabled:opacity-40"><RefreshCw className="w-4 h-4" />同步时间</button>
+            </div>
+          </section>
 
-            {/* 4. 底部断开 */}
-            <section className="pt-4">
-              <button onClick={() => { if(server) server.disconnect(); onDisconnected(); }} className="w-full py-3 text-red-400 text-sm font-medium hover:text-red-600 flex items-center justify-center gap-2">
-                <XCircle className="w-4 h-4" /> 断开设备连接
-              </button>
-              
-              <div className="mt-4 bg-slate-200 rounded-lg p-2 h-20 overflow-y-auto text-[10px] font-mono text-slate-500">
-                {logs.map((l,i) => <div key={i}>{l}</div>)}
-              </div>
-            </section>
-
-          </>
-        )}
+          <details className="bg-white rounded-2xl p-4 text-sm text-slate-600">
+            <summary className="cursor-pointer font-medium">控制器旋钮操作</summary>
+            <p className="mt-3 leading-relaxed" data-testid="knob-hint">{display.hint}</p>
+          </details>
+          <details className="bg-white rounded-2xl p-4 text-sm text-slate-600">
+            <summary className="cursor-pointer font-medium">设备回读与连接记录</summary>
+            <dl className="grid grid-cols-2 gap-2 mt-3">
+              <dt>控制输出</dt><dd>{fresh ? (deviceData.relay ? '开启' : '关闭') : '待确认'}</dd>
+              <dt>DI 反馈</dt><dd>{fresh && deviceData.feedback >= 0 ? deviceData.feedback : '待确认'}</dd>
+            </dl>
+            <div className="mt-3 bg-slate-50 rounded-lg p-3 max-h-32 overflow-y-auto break-words text-xs font-mono">{logs.map((line,i)=><div key={i}>{line}</div>)}</div>
+          </details>
+          <button onClick={onDisconnected} className="w-full py-3 text-slate-600 text-sm font-medium flex items-center justify-center gap-2"><XCircle className="w-4 h-4" />断开蓝牙连接</button>
+        </>}
       </main>
     </div>
   );
