@@ -15,6 +15,7 @@ export default defineConfig({
         short_name: 'InsulCtrl',
         description: '查看开关机反馈，设置定时开机',
         theme_color: '#ffffff',
+        display: 'standalone',
         scope: '/insul-ctrl/',
         start_url: '/insul-ctrl/',
         icons: [

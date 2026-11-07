@@ -1,5 +1,7 @@
 // One GATT write in flight. Stop discards unsent commands; reconnect discards
 // the previous connection's queue. A write already in flight cannot be recalled.
+// A failed write rejects only that command: the App decides from the GATT link
+// state whether the session is gone, so a stop can still be retried.
 export class CommandQueue {
   constructor(write) { this.write=write; this.pending=[]; this.running=false; this.closed=false; }
   send(command) {
@@ -10,7 +12,12 @@ export class CommandQueue {
       this.drain();
     });
   }
-  cancelPending(reason) { for (const item of this.pending.splice(0)) item.reject(new Error(reason)); }
+  cancelPending(reason) {
+    for (const item of this.pending.splice(0)) {
+      const error=new Error(reason); error.canceled=true;
+      item.reject(error);
+    }
+  }
   close() { this.closed=true; this.cancelPending('连接已断开'); }
   async drain() {
     if (this.running) return;
@@ -19,7 +26,7 @@ export class CommandQueue {
       while (!this.closed && this.pending.length) {
         const item=this.pending.shift();
         try { await this.write(item.command); item.resolve(); }
-        catch (error) { item.reject(error); this.close(); }
+        catch (error) { item.reject(error); }
       }
     } finally { this.running=false; }
   }

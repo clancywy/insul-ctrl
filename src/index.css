@@ -1,3 +1,41 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* One screen, no page scroll: the shell owns the viewport; only .app-body may scroll
+   as a last resort, and the action bar never leaves the screen. */
+html, body { height: 100%; margin: 0; overscroll-behavior: none; background: #fff; }
+#root { height: 100vh; height: 100dvh; container-type: size; }
+
+.app-shell { position: relative; display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.app-row { display: flex; min-height: fit-content; flex: 1 1 auto; flex-direction: column; justify-content: center; padding: .375rem 1rem; }
+.app-actions { padding-bottom: max(.625rem, env(safe-area-inset-bottom)); }
+.app-toast { position: absolute; top: .5rem; left: .75rem; right: .75rem; z-index: 50; }
+.app-actions > .app-toast { top: auto; bottom: calc(100% + .5rem); }
+.app-sheet { position: absolute; inset: 0; z-index: 40; }
+
+/* Same rule for both big times (confirmed requirement), scaled down only on short screens. */
+.big-time { font-size: clamp(2.25rem, 11vw, 3rem); font-size: clamp(2rem, min(11cqw, 7.4cqh), 3rem); line-height: 1.15; }
+.app-title { font-size: 1.75rem; font-size: clamp(1.5rem, min(10cqw, 6cqh), 2.5rem); }
+.action-button { min-height: 3.5rem; min-height: clamp(3.25rem, 9cqh, 4.5rem); }
+
+.time-select {
+  -webkit-appearance: none; appearance: none;
+  background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: .625rem;
+  padding: .02em .16em; color: inherit; text-align: center; text-align-last: center;
+}
+.time-select:focus-visible { outline: 2px solid #2563eb; outline-offset: 1px; }
+
+/* Landscape phones: status + actions on the left, times on the right. */
+@container (max-height: 460px) and (min-width: 520px) {
+  .app-shell.is-connected { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr auto; }
+  .app-band { grid-column: 1; grid-row: 1 / 3; }
+  .app-banner { grid-column: 2; grid-row: 1; }
+  .app-body { grid-column: 2; grid-row: 2 / 4; }
+  .app-actions { grid-column: 1; grid-row: 3; }
+  .big-time { font-size: clamp(1.75rem, 10cqh, 2.5rem); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin { animation: none; }
+}
