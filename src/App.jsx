@@ -3,10 +3,11 @@ import { Bluetooth, MoreHorizontal, Power, ShieldCheck, RefreshCw, AlertTriangle
 import { initialDevice, parseFrame, errorMessage, deviceSeconds, countdown, canStart, statusFresh, canConfigure, canAcknowledge, armPreview, targetDay, hasCommandReadback, stopKind, stopFailureText, diagnosticText } from './protocol.js';
 import { CommandQueue } from './commandQueue.js';
 import { displayState, triggerTime, alarmStatus, LAMPS } from './presentation.js';
+import HoldActionButton from './HoldActionButton.jsx';
 
 const SERVICE_UUID = '0000aaaa-0000-1000-8000-00805f9b34fb';
 const CHAR_UUID_CMD = '0000bbbb-0000-1000-8000-00805f9b34fb';
-const APP_VERSION = 'v4.2.0';
+const APP_VERSION = 'v4.2.1';
 const TAP_GUARD_MS = 400;      // a double tap must not land on the button that replaces the first one
 const START_LOCK_MS = 5000;    // same as the controller's restart interval
 const TAP_LOCK_MS = 2000;      // after cancelling without an output-off: only guards against a repeated tap
@@ -332,6 +333,10 @@ export default function InsulCtrlApp() {
   const localEditing=fresh && deviceData.mode==='SETTING';
 
   const stopFault=display.key==='FAULT' && deviceData.relay;
+  const immediateStop=display.key==='WAIT' || display.key==='FAULT' || deviceData.fault>0 || deviceData.feedbackFault>0;
+  // A hold belongs to this device/state only; it must not survive a new action bar or overlay.
+  const holdContext=`${connState}:${display.key}:${deviceData.mode}:${deviceData.fault}:${deviceData.feedbackFault}:${needPin}:${sheet}`;
+  const actionStatus=command=>sending(command) ? (pending.sentAt===null ? '正在发送' : '等待设备回读') : '';
   const ackReason=deviceData.feedback===1 ? '反馈 DI 仍为 1，释放后才能确认。' : deviceData.feedback<0 ? '反馈 DI 未知，请检查反馈。' : ackAllowed ? '确认只清除故障，不会开机。' : '等待输出关闭与反馈释放。';
 
   const toastView=toast.show && <div role="status" className={`app-toast rounded-xl px-4 py-3 text-sm font-medium shadow-lg ${toast.type === 'error' ? 'bg-red-600 text-white' : 'bg-slate-800 text-white'}`}>
@@ -465,34 +470,36 @@ export default function InsulCtrlApp() {
             </div>
             <p className="text-center text-xs text-slate-600">输入控制器屏幕上显示的口令，手机会记住。关机不需要口令。</p>
           </form>}
-          {needPin && display.key==='IDLE' && <button onClick={doStop} className={STOP_BUTTON}><Power className="h-5 w-5" />关机</button>}
+          {needPin && display.key==='IDLE' && <HoldActionButton label="关机" onConfirm={doStop} cancelKey={holdContext} statusText={actionStatus('R:0')} className={STOP_BUTTON}><Power className="h-5 w-5" />关机</HoldActionButton>}
           {display.key === 'IDLE' && !needPin && <>
             <div className="grid grid-cols-[2fr_3fr] gap-4">
-              <button onClick={doStart} disabled={!startAllowed || startLockLeft>0} className={`${actionBase} bg-red-600 text-white`}>
+              <HoldActionButton label="开机" onConfirm={doStart} cancelKey={holdContext} statusText={actionStatus('R:1')} disabled={!startAllowed || startLockLeft>0 || sending('R:1')} className={`${actionBase} bg-red-600 text-white`}>
                 {sending('R:1') ? <Loader2 className="h-5 w-5 animate-spin" /> : <Power className="h-5 w-5" />}开机{startLockLeft>0 ? ` ${startLockLeft}s` : ''}
-              </button>
+              </HoldActionButton>
               <button onClick={doArm} disabled={!startAllowed || startLockLeft>0 || dirty} className={`${actionBase} bg-blue-600 text-white`}>
                 {sending('M:1') ? <Loader2 className="h-5 w-5 animate-spin" /> : <ShieldCheck className="h-5 w-5" />}启用闹钟{startLockLeft>0 ? ` ${startLockLeft}s` : ''}
               </button>
             </div>
-            <p className="text-center text-xs text-slate-500">{dirty ? '请先保存或还原时间，再启用闹钟。' : startLockLeft>0 ? startLock.text : '点击立即执行'}</p>
+            <p className="text-center text-xs text-slate-500">{dirty ? '请先保存或还原时间，再启用闹钟。' : startLockLeft>0 ? startLock.text : '长按2秒开机 · 点击启用闹钟'}</p>
           </>}
           {display.key === 'ARMED' && <button onClick={doDisarm} className={`${actionBase} w-full bg-blue-600 text-white`}>{sending('M:0') && <Loader2 className="h-5 w-5 animate-spin" />}取消闹钟</button>}
-          {['ON','PICKUP','RELEASE'].includes(display.key) && <button onClick={doStop} className={STOP_BUTTON}>{sending('R:0') ? <Loader2 className="h-5 w-5 animate-spin" /> : <Power className="h-5 w-5" />}关机</button>}
+          {['ON','PICKUP','RELEASE'].includes(display.key) && (immediateStop
+            ? <button aria-label="关机" onClick={doStop} className={STOP_BUTTON}><Power className="h-5 w-5" />立即关机</button>
+            : <HoldActionButton label="关机" onConfirm={doStop} cancelKey={holdContext} statusText={actionStatus('R:0')} className={STOP_BUTTON}>{sending('R:0') ? <Loader2 className="h-5 w-5 animate-spin" /> : <Power className="h-5 w-5" />}关机</HoldActionButton>)}
           {display.key === 'WAIT' && <>
-            <button onClick={doStop} className={STOP_BUTTON}><Power className="h-5 w-5" />关机</button>
+            <button aria-label="关机" onClick={doStop} className={STOP_BUTTON}><Power className="h-5 w-5" />立即关机</button>
             <button onClick={()=>{ onDisconnected(true); connectBLE(true); }} className="py-1.5 text-sm font-semibold text-blue-700">状态一直不恢复？重新连接</button>
           </>}
           {display.key === 'SETTING' && <>
             <p className="rounded-lg bg-amber-50 p-2 text-center text-sm text-amber-800">请先在控制器上保存设置，再使用手机操作。</p>
             <button onClick={doStop} className={`${actionBase} w-full border border-slate-300 bg-white text-base text-slate-700`}>取消本地设置（不保存）</button>
           </>}
-          {display.key === 'FAULT' && (stopFault || deviceData.fault===4 || needPin ? <button onClick={doStop} className={STOP_BUTTON}><Power className="h-5 w-5" />关机</button> : <>
+          {display.key === 'FAULT' && (stopFault || deviceData.fault===4 || needPin ? <button aria-label="关机" onClick={doStop} className={STOP_BUTTON}><Power className="h-5 w-5" />立即关机</button> : <>
             <div className="grid grid-cols-[1fr_auto] gap-2">
               {fbFault && <button onClick={doAck} disabled={!ackAllowed} className={`${actionBase} border border-pink-300 bg-pink-50 text-pink-800`}>确认故障</button>}
               {rtcFault && (configureAllowed ? <button onClick={doSync} className={`${actionBase} bg-blue-600 text-white`}><RefreshCw className="h-5 w-5" />同步时间</button> : <span className="flex items-center text-sm text-slate-600">请先在控制器上保存设置。</span>)}
               {settingsFault && (configureAllowed ? <button onClick={doSave} className={`${actionBase} bg-slate-800 text-white`}>重新保存 {formatShortTime(shownTime.h,shownTime.m)}</button> : <span className="flex items-center text-sm text-slate-600">请先在控制器上保存设置。</span>)}
-              <button onClick={doStop} aria-label="关机" className={`${actionBase} bg-green-700 text-base text-white`}>{localEditing ? '关机并取消设置' : '关机'}</button>
+              <button onClick={doStop} aria-label="关机" className={`${actionBase} bg-green-700 text-base text-white`}>{localEditing ? '关机并取消设置' : '立即关机'}</button>
             </div>
             {fbFault && <p className="text-center text-xs text-slate-600">{ackReason}</p>}
           </>)}
@@ -503,7 +510,7 @@ export default function InsulCtrlApp() {
           <div className="absolute inset-x-0 bottom-0 max-h-[88%] space-y-3 overflow-y-auto rounded-t-2xl bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))] text-sm text-slate-700">
             <div className="flex items-center justify-between"><h2 className="text-base font-bold">更多信息</h2><button aria-label="关闭" onClick={()=>setSheet(false)} className="-mr-2 p-2"><X className="h-5 w-5" /></button></div>
             <div><h3 className="font-semibold">控制器旋钮操作</h3><p className="mt-1 leading-relaxed" data-testid="knob-hint">{display.hint}</p></div>
-            <div><h3 className="font-semibold">操作规则</h3><p className="mt-1 leading-relaxed">手机按钮点击即执行，关机同时取消闹钟。保存的时间会保留，重新上电后需手动启用闹钟。设备时钟按 UTC+8 显示。</p></div>
+            <div><h3 className="font-semibold">操作规则</h3><p className="mt-1 leading-relaxed">开机、正常关机需按住2秒，进度满后执行，提前松手或滑出取消。故障或状态待确认时可点击立即关机。其他按钮仍为点击执行。关机同时取消闹钟；保存的时间会保留，重新上电后需手动启用闹钟。设备时钟按 UTC+8 显示。</p></div>
             <div><h3 className="font-semibold">设备回读</h3>
               <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5">
                 <dt>控制输出</dt><dd>{fresh ? (deviceData.relay ? '开启' : '关闭') : '待确认'}</dd>
