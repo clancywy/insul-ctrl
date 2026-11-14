@@ -21,6 +21,7 @@ const pad = v => String(v).padStart(2,'0');
 const formatShortTime = (h,m) => `${pad(h)}:${pad(m)}`;
 const HOURS = [...Array(24).keys()];
 const MINUTES = [...Array(60).keys()];
+const sameDevice = (a,b) => Boolean(a && b && (a===b || (a.id && a.id===b.id)));
 
 function formatDrift(drift) {
   const size = Math.abs(drift);
@@ -105,7 +106,7 @@ export default function InsulCtrlApp() {
     if(!quiet) addLog('设备已断开');
   };
 
-  const connectBLE=async(reuse=false)=>{
+  const connectBLE=async(reuse=false,targetDevice=null)=>{
     const token={};
     attempt.current=token;
     let c;
@@ -116,8 +117,8 @@ export default function InsulCtrlApp() {
     };
     try {
       setConnState('connecting'); setDeviceData(initialDevice());
-      const device=reuse && lastDevice.current ? lastDevice.current
-        : await navigator.bluetooth.requestDevice({filters:[{namePrefix:'InsulCtrl'}],optionalServices:[SERVICE_UUID]});
+      const device=targetDevice ?? (reuse && lastDevice.current ? lastDevice.current
+        : await navigator.bluetooth.requestDevice({filters:[{namePrefix:'InsulCtrl'}],optionalServices:[SERVICE_UUID]}));
       if(attempt.current!==token) return;
       // The system chooser has no time limit of its own: the user may take as long as they need.
       timeout=setTimeout(()=>{ if(attempt.current===token) { onDisconnected(true,Boolean(sendFailure?.stopping)); showToast('连接超时，请靠近控制器后重试','error'); } },CONNECT_TIMEOUT_MS);
@@ -210,12 +211,15 @@ export default function InsulCtrlApp() {
   },[draft,dirty,configureAllowed]);
 
   useEffect(()=>{
+    if(sendFailure?.command==='R:1' && !startAllowed) setSendFailure(null);
+  },[sendFailure,startAllowed]);
+
+  useEffect(()=>{
     const failed=unresolvedStop.current;
     const active=connection.current?.device;
-    const sameDevice=failed && (failed.device===active || (failed.device.id && failed.device.id===active?.id));
     // A failed alarm cancel is settled once the device is no longer armed: cancelled, or the alarm already fired.
     const settled=failed?.kind==='alarm' ? deviceData.mode!=='ARMED' : !deviceData.relay && deviceData.mode==='IDLE';
-    if(sameDevice && hasCommandReadback(deviceData,failed.command,failed.at,now) && settled) {
+    if(failed && sameDevice(failed.device,active) && hasCommandReadback(deviceData,failed.command,failed.at,now) && settled) {
       unresolvedStop.current=null;
       if(pendingRef.current?.command===failed.command) pendingRef.current=null;
       setSendFailure(f=>f?.stopping ? null : f);
@@ -268,12 +272,13 @@ export default function InsulCtrlApp() {
     const request=expect ? {...expect,expect,command,at:performance.now(),sentAt:null,stopKind:kind} : null;
     if(request) { pendingRef.current=request; setPending(request); }
     try {
-      await c.queue.send(command);
+      const written=await c.queue.send(command,command.startsWith('T:')
+        ? ()=>`T:${Math.floor(Date.now()/1000)}` : undefined);
       if(connection.current!==c) return;
-      const sent=request ? {...request,sentAt:performance.now()} : null;
+      const sent=request ? {...request,command:written,sentAt:performance.now()} : null;
       if(pendingRef.current===request) pendingRef.current=sent;
       setPending(p=>p===request ? sent : p);
-      addLog(`已发送 ${command}`); failCount.current=0;
+      addLog(`已发送 ${written}`); failCount.current=0;
     }
     catch(error) {
       if(connection.current!==c) return;
@@ -293,7 +298,7 @@ export default function InsulCtrlApp() {
         showToast(guarded?stopFailureText(kind,'gone'):'蓝牙已断开，命令未发出。','error');
         return;
       }
-      setSendFailure(unresolvedStop.current ?? {command,expect,stopping,text:`${expect?.label ?? '命令'}未发出（蓝牙写入失败）。`});
+      setSendFailure(unresolvedStop.current ?? {device:c.device,command,expect,stopping,text:`${expect?.label ?? '命令'}未发出（蓝牙写入失败）。${command==='R:1'?'请在下方按住开机按钮2秒重试。':''}`});
     }
   };
   const submitPin=event=>{
@@ -313,7 +318,10 @@ export default function InsulCtrlApp() {
   };
   const stopOff=d=>!d.relay && d.mode==='IDLE';
   const doStop=()=>act('R:0',{label:display.key==='SETTING' ? '取消设置命令' : '关机命令',done:stopOff});
-  const doStart=()=>act('R:1',{label:'开机命令',done:d=>d.relay || d.fault>0 || d.feedbackFault>0});
+  const doStart=()=>{
+    if(!canStart(deviceData,performance.now()) || performance.now()<startLock.until) return;
+    act('R:1',{label:'开机命令',done:d=>d.relay || d.fault>0 || d.feedbackFault>0});
+  };
   const doArm=()=>act('M:1',{label:'启用闹钟命令',done:d=>d.mode==='ARMED' || d.fault>0 || d.feedbackFault>0});
   const doDisarm=()=>act('M:0',{label:'取消闹钟命令',done:d=>d.mode!=='ARMED'});
   const doAck=()=>act('F:0',{label:'确认故障命令',done:d=>d.feedbackFault===0,ok:'故障已确认，需手动重新启用'});
@@ -325,6 +333,25 @@ export default function InsulCtrlApp() {
     const ts=Math.floor(Date.now()/1000);
     act(`T:${ts}`,{label:'同步时间命令',done:(d,t)=>Math.abs(deviceSeconds(d,t)-Math.floor(Date.now()/1000))<=2,ok:'设备时间已同步'});
   };
+  const retryPermitted=(command,t)=>command==='R:0'
+    || (command==='M:0' && statusFresh(deviceData,t) && deviceData.mode==='ARMED')
+    || ((command?.startsWith('A:') || command?.startsWith('T:')) && canConfigure(deviceData,t))
+    || (command==='M:1' && canStart(deviceData,t) && t>=startLock.until && !dirty)
+    || (command==='F:0' && canAcknowledge(deviceData,t));
+  const retryFailure=()=>{
+    const failure=sendFailure;
+    if(!failure || !sameDevice(failure.device,connection.current?.device)
+      || !retryPermitted(failure.command,performance.now())) return;
+    if(failure.command.startsWith('T:')) doSync();
+    else act(failure.command,failure.expect);
+  };
+  const reconnectFailure=()=>{
+    const target=sendFailure?.device;
+    if(!target) return;
+    onDisconnected(true,true);
+    connectBLE(false,target);
+  };
+  const failureOnCurrentDevice=sameDevice(sendFailure?.device,connection.current?.device);
   const sending=command=>pending?.command===command || (command==='T' && pending?.command?.startsWith('T:')) || (command==='A' && pending?.command?.startsWith('A:'));
 
   const fbFault=display.key==='FAULT' && deviceData.feedbackFault>0;
@@ -355,7 +382,7 @@ export default function InsulCtrlApp() {
         <main className="flex min-h-0 flex-1 flex-col justify-center gap-3 overflow-y-auto bg-slate-100 p-4">
           {sendFailure?.stopping && <div role="alert" className="app-banner rounded-xl bg-red-600 p-3 text-sm font-medium text-white">
             <p>{sendFailure.text}</p>
-            {connState==='disconnected' && <button onClick={()=>connectBLE(true)} className="mt-2 rounded-lg bg-white px-3 py-2 font-bold text-red-700">重试连接</button>}
+            {connState==='disconnected' && <button onClick={()=>connectBLE(false,sendFailure.device)} className="mt-2 rounded-lg bg-white px-3 py-2 font-bold text-red-700">重试连接</button>}
           </div>}
           {connState === 'disconnected' && <>
             {lastKnown && ['ON','PICKUP','RELEASE','ARMED','FAULT'].includes(lastKnown.key) && <div role="alert" className="flex gap-2 rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
@@ -411,8 +438,9 @@ export default function InsulCtrlApp() {
 
         {sendFailure && <div role="alert" className={`app-banner flex shrink-0 items-center gap-2 px-4 py-2 text-sm font-medium ${sendFailure.soft ? 'bg-amber-100 text-amber-900' : 'bg-red-600 text-white'}`}>
           <AlertTriangle className="h-4 w-4 shrink-0" />
-          <p className="min-w-0 flex-1">{sendFailure.text}</p>
-          {!sendFailure.soft && <button onClick={()=>sendCommand(sendFailure.command,sendFailure.expect)} className="shrink-0 rounded-lg bg-white px-3 py-1.5 font-bold text-red-700">重试</button>}
+          <p className="min-w-0 flex-1">{sendFailure.stopping && !failureOnCurrentDevice && <span>原设备 {sendFailure.device?.name ?? 'InsulCtrl'} 的停止尚未确认，当前连接了其他设备。 </span>}{sendFailure.text}</p>
+          {!sendFailure.soft && !failureOnCurrentDevice && sendFailure.device && <button onClick={reconnectFailure} className="shrink-0 rounded-lg bg-white px-3 py-1.5 font-bold text-red-700">重新连接原设备</button>}
+          {!sendFailure.soft && failureOnCurrentDevice && sendFailure.command!=='R:1' && <button onClick={retryFailure} disabled={!retryPermitted(sendFailure.command,now)} className="shrink-0 rounded-lg bg-white px-3 py-1.5 font-bold text-red-700 disabled:opacity-40">重试</button>}
           {sendFailure.soft && <button aria-label="关闭提示" onClick={()=>setSendFailure(null)} className="shrink-0 p-1"><X className="h-4 w-4" /></button>}
         </div>}
 

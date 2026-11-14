@@ -4,11 +4,11 @@
 // state whether the session is gone, so a stop can still be retried.
 export class CommandQueue {
   constructor(write) { this.write=write; this.pending=[]; this.running=false; this.closed=false; }
-  send(command) {
+  send(command, prepare) {
     if (this.closed) return Promise.reject(new Error('连接已断开'));
     if (command === 'R:0' || command === 'M:0') this.cancelPending('命令已被停止操作取消');
     return new Promise((resolve,reject) => {
-      this.pending.push({command,resolve,reject});
+      this.pending.push({command,prepare,resolve,reject});
       this.drain();
     });
   }
@@ -25,7 +25,11 @@ export class CommandQueue {
     try {
       while (!this.closed && this.pending.length) {
         const item=this.pending.shift();
-        try { await this.write(item.command); item.resolve(); }
+        try {
+          // Time-sensitive payloads are created only once they reach the writer.
+          const command=item.prepare ? item.prepare(item.command) : item.command;
+          await this.write(command); item.resolve(command);
+        }
         catch (error) { item.reject(error); }
       }
     } finally { this.running=false; }
